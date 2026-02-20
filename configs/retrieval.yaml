@@ -1,0 +1,7 @@
+# FAISS index and query
+data_dir: data
+model_path: data/model.pt
+model_name: all-MiniLM-L6-v2
+index_path: data/product.index
+meta_path: data/product_meta.parquet
+top_k: 10

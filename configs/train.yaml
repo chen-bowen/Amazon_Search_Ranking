@@ -1,0 +1,11 @@
+# Two-tower training on ESCI (relevant pairs only, in-batch negatives + self-adversarial reweighting)
+data_dir: data
+model_name: all-MiniLM-L6-v2
+shared_tower: false
+batch_size: 64
+epochs: 3
+lr: 2.0e-5
+temperature: 0.05
+reweight_hard: true
+hard_weight_power: 1.0
+save_path: data/model.pt

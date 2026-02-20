@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.python-version
+
+# Data and artifacts
+data/*.parquet
+data/*.csv
+data/esci-data/
+*.pt
+*.pth
+*.faiss
+*.index
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# uv
+.uv/
