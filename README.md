@@ -10,12 +10,13 @@ uv sync
 
 ## Data
 
-Download ESCI data (parquet files) into `data/` and run:
+Place the [Amazon ESCI](https://github.com/amazon-science/esci-data) parquet files in `data/` (or `data/esci-data/shopping_queries_dataset/`). Then load and save train/test splits:
 
 ```bash
-uv run python -m src.data.download_esci
-uv run python -m src.data.prepare_esci
+uv run python -m src.data.load_esci --save-splits
 ```
+
+This writes `data/esci_train.parquet` and `data/esci_test.parquet`.
 
 ## Train
 

@@ -3,11 +3,14 @@ Build FAISS index from product embeddings and save product_id / product_text met
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
+
+logger = logging.getLogger(__name__)
 
 try:
     import faiss
@@ -73,6 +76,7 @@ def load_index_and_meta(
 
 def main() -> int:
     import argparse
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     p = argparse.ArgumentParser(description="Build FAISS index from product embeddings")
     p.add_argument("--config", type=str, default="configs/retrieval.yaml")
     p.add_argument("--model-path", type=str, default="data/model.pt")
@@ -90,12 +94,12 @@ def main() -> int:
     if args.products and Path(args.products).exists():
         products_df = pd.read_parquet(args.products)
     else:
-        from src.data.load_esci import load_esci
+        from src.data.load_data import load_esci
         base = Path(args.data_dir or DATA_DIR)
         df = load_esci(data_dir=base / "esci-data" / "shopping_queries_dataset")
         products_df = df[["product_id", "product_text"]].drop_duplicates("product_id").reset_index(drop=True)
     build_faiss_index(model, products_df, index_path=args.index, meta_path=args.meta, device=device)
-    print(f"Index saved: {args.index}, meta: {args.meta}")
+    logger.info("Index saved: %s, meta: %s", args.index, args.meta)
     return 0
 
 

@@ -1,13 +1,16 @@
 """
 Training loop: load relevant (query, product) pairs, in-batch negatives, self-adversarial loss.
 """
-from __future__ import annotations  # Enable postponed evaluation of type hints
+from __future__ import annotations
 
-import argparse  # For command-line argument parsing
-from pathlib import Path  # For path manipulation
+import argparse
+import logging
+from pathlib import Path
 
-import pandas as pd  # For DataFrame operations
-import torch  # PyTorch tensor operations
+import pandas as pd
+import torch
+
+logger = logging.getLogger(__name__)
 from torch.utils.data import Dataset  # Base class for datasets
 
 from src.models.two_tower import TwoTowerEncoder  # Two-tower model
@@ -63,7 +66,7 @@ def run_training(
         base = Path(data_dir or DATA_DIR)  # Use provided data_dir or default
         train_path = base / "esci_train.parquet"  # Path to preprocessed train parquet
         if not train_path.exists():  # If preprocessed file doesn't exist
-            from src.data.load_esci import load_esci, prepare_train_test
+            from src.data.load_data import load_esci, prepare_train_test
             # Load raw ESCI data and split into train/test
             _df = load_esci(data_dir=base / "esci-data" / "shopping_queries_dataset")
             train_df, _ = prepare_train_test(df=_df)  # Extract train split
@@ -106,7 +109,7 @@ def run_training(
             opt.step()  # Update model parameters using gradients
             total_loss += loss.item()  # Add batch loss to accumulator (detach from graph)
             n_batches += 1  # Increment batch counter
-        print(f"Epoch {epoch+1}/{epochs} loss={total_loss/max(n_batches,1):.4f}")  # Print average epoch loss
+        logger.info("Epoch %s/%s loss=%.4f", epoch + 1, epochs, total_loss / max(n_batches, 1))
     if save_path is not None:  # If save path provided
         save_path = Path(save_path)  # Convert to Path object
         save_path.parent.mkdir(parents=True, exist_ok=True)  # Create parent directories if needed
@@ -116,10 +119,9 @@ def run_training(
 
 
 def main() -> int:
-    """
-    Command-line entry point: parse args, load config, run training.
-    """
-    import yaml  # For YAML config file parsing
+    """Command-line entry point: parse args, load config, run training."""
+    import yaml
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     p = argparse.ArgumentParser(description="Train two-tower encoder on ESCI")  # Create argument parser
     p.add_argument("--config", type=str, default="configs/train.yaml", help="Config YAML (optional)")  # Config file path
     p.add_argument("--data-dir", type=str, default=None)  # Override data directory

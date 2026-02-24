@@ -3,10 +3,13 @@ Query the FAISS index: embed query, run ANN, return top-k product IDs and scores
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 from src.models.two_tower import TwoTowerEncoder
 from src.retrieval.build_index import load_index_and_meta
@@ -43,6 +46,7 @@ def search(
 def main() -> int:
     import argparse
     import yaml
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     p = argparse.ArgumentParser(description="Query FAISS index with a search string")
     p.add_argument("--config", type=str, default="configs/retrieval.yaml")
     p.add_argument("--query", type=str, required=True)
@@ -68,7 +72,7 @@ def main() -> int:
     index, meta = load_index_and_meta(index_path, meta_path)
     results = search(args.query, model, index, meta, top_k=args.top_k or cfg.get("top_k", 10), device=device)
     for pid, score in results:
-        print(f"{score:.4f}\t{pid}")
+        logger.info("%.4f\t%s", score, pid)
     return 0
 
 

@@ -1,14 +1,17 @@
 """
 Evaluate two-tower model on ESCI test set: compute nDCG@k and MRR.
 """
-from __future__ import annotations  # Enable postponed evaluation of type hints
+from __future__ import annotations
 
-import argparse  # For command-line argument parsing
-from pathlib import Path  # For path manipulation
+import argparse
+import logging
+from pathlib import Path
 
-import numpy as np  # For array operations
-import pandas as pd  # For DataFrame operations
-import torch  # PyTorch tensor operations
+import numpy as np
+import pandas as pd
+import torch
+
+logger = logging.getLogger(__name__)
 
 from src.eval.metrics import evaluate_ranking  # Ranking evaluation functions
 from src.models.two_tower import TwoTowerEncoder  # Two-tower model
@@ -35,7 +38,7 @@ def run_evaluation(
         base = Path(data_dir or DATA_DIR)  # Use provided data_dir or default
         test_path = base / "esci_test.parquet"  # Path to preprocessed test parquet
         if not test_path.exists():  # If preprocessed file doesn't exist
-            from src.data.load_esci import load_esci, prepare_train_test
+            from src.data.load_data import load_esci, prepare_train_test
             # Load raw ESCI data and split into train/test
             _, test_df = prepare_train_test(data_dir=base / "esci-data" / "shopping_queries_dataset")
         else:  # If preprocessed file exists
@@ -68,10 +71,9 @@ def run_evaluation(
 
 
 def main() -> int:
-    """
-    Command-line entry point: parse args, load config, run evaluation.
-    """
-    import yaml  # For YAML config file parsing
+    """Command-line entry point: parse args, load config, run evaluation."""
+    import yaml
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     p = argparse.ArgumentParser(description="Evaluate two-tower on ESCI test set")  # Create argument parser
     p.add_argument("--config", type=str, default="configs/eval.yaml")  # Config file path
     p.add_argument("--model-path", type=str, default=None)  # Override model checkpoint path
@@ -92,8 +94,8 @@ def main() -> int:
         model_name=args.model_name or cfg.get("model_name", "all-MiniLM-L6-v2"),  # Model name
         k=args.k if args.k is not None else cfg.get("k", 10),  # k for nDCG@k
     )
-    print("Metrics:", metrics)  # Print evaluation metrics
-    return 0  # Exit successfully
+    logger.info("Metrics: %s", metrics)
+    return 0
 
 
 if __name__ == "__main__":
