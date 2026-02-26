@@ -16,11 +16,12 @@ def contrastive_loss_with_reweighting(
     product_emb: torch.Tensor,
     reweight_hard: bool = True,
     hard_weight_power: float = 1.0,
+    temperature: float = 1.0,
 ) -> torch.Tensor:
     """
     InfoNCE loss with in-batch negatives and a simple self-adversarial reweighting.
 
-    Logits are raw dot products (L2-normalized ⇒ cosine similarity). No temperature scaling.
+    Logits are raw dot products (L2-normalized ⇒ cosine similarity). Optional temperature scaling.
 
     Shapes
     ------
@@ -36,12 +37,23 @@ def contrastive_loss_with_reweighting(
     hard_weight_power:
         Strength of hard-negative reweighting. When > 0, off-diagonal logits are scaled
         by (1 + hard_weight_power) so that negatives contribute more.
+    temperature:
+        Softmax temperature. Effective logits are logits / temperature. Values < 1.0
+        make the distribution sharper; values > 1.0 make it softer. Default: 1.0.
+
+    Returns
+    -------
+    - loss : torch.Tensor
+        Loss tensor.
     """
     B = query_emb.size(0)
     device = query_emb.device
 
     # Similarity matrix: [B, B] (cosine sim when embeddings are L2-normalized).
     logits = torch.mm(query_emb, product_emb.t())
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    logits = logits / temperature
 
     # For each query i, the positive is product i (diagonal of logits).
     labels = torch.arange(B, device=device, dtype=torch.long)

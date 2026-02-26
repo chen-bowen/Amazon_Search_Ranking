@@ -1,6 +1,7 @@
 """
 Query the FAISS index: embed query, run ANN, return top-k product IDs and scores.
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,6 +28,26 @@ def search(
 ) -> list[tuple[str, float]]:
     """
     Returns list of (product_id, score) for top-k. Score = cosine similarity (dot product on normalized).
+
+    Parameters
+    ----------
+    - query : str
+        Query string.
+    - model : TwoTowerEncoder
+        TwoTowerEncoder model.
+    - index : faiss.Index
+        FAISS index.
+    - meta_df : pd.DataFrame
+        Metadata DataFrame.
+    - top_k : int
+        Number of top products to return.
+    - device : str | torch.device
+        Device to use for encoding.
+
+    Returns
+    -------
+    - out : list[tuple[str, float]]
+        List of (product_id, score) for top-k.
     """
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     q_emb = model.encode_queries([query], device=device)

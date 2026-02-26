@@ -1,6 +1,7 @@
 """
 Build FAISS index from product embeddings and save product_id / product_text metadata.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,6 +38,32 @@ def build_faiss_index(
     """
     Encode all product_text, build FAISS index (inner product on normalized = cosine).
     products_df should have product_id and product_text (expanded). Returns (index, meta_df).
+
+    Parameters:
+    ----------
+    - model : TwoTowerEncoder
+        TwoTowerEncoder model.
+    - products_df : pd.DataFrame
+        DataFrame with product_id and product_text.
+    - product_id_col : str
+        Column name for product_id.
+    - product_text_col : str
+        Column name for product_text.
+    - index_path : Path | str | None
+        Path to save the FAISS index.
+    - meta_path : Path | str | None
+        Path to save the metadata.
+    - device : str | torch.device
+        Device to use for encoding.
+    - batch_size : int
+        Batch size for encoding.
+
+    Returns
+    -------
+    - index : faiss.Index
+        FAISS index.
+    - meta : pd.DataFrame
+        Metadata DataFrame.
     """
     if faiss is None:
         raise ImportError("faiss-cpu or faiss-gpu is required")
@@ -50,6 +77,7 @@ def build_faiss_index(
         e = model.encode_products(batch, device=device)
         embs.append(e.cpu().numpy())
     embs = np.vstack(embs).astype(np.float32)
+
     # FAISS index for inner product (IndexFlatIP) with normalized vectors = cosine
     index = faiss.IndexFlatIP(embs.shape[1])
     index.add(embs)
@@ -67,6 +95,23 @@ def load_index_and_meta(
     index_path: Path | str,
     meta_path: Path | str,
 ) -> tuple[faiss.Index, pd.DataFrame]:
+    """
+    Load FAISS index and metadata from files.
+
+    Parameters
+    ----------
+    - index_path : Path | str
+        Path to the FAISS index.
+    - meta_path : Path | str
+        Path to the metadata.
+
+    Returns
+    -------
+    - index : faiss.Index
+        FAISS index.
+    - meta : pd.DataFrame
+        Metadata DataFrame.
+    """
     if faiss is None:
         raise ImportError("faiss-cpu or faiss-gpu is required")
     index = faiss.read_index(str(index_path))
@@ -101,14 +146,8 @@ def main() -> int:
         base = Path(args.data_dir or DATA_DIR)
         # Load ESCI parquets from base data directory (expects files directly under `data/`).
         df = load_esci(data_dir=base)
-        products_df = (
-            df[["product_id", "product_text"]]
-            .drop_duplicates("product_id")
-            .reset_index(drop=True)
-        )
-    build_faiss_index(
-        model, products_df, index_path=args.index, meta_path=args.meta, device=device
-    )
+        products_df = df[["product_id", "product_text"]].drop_duplicates("product_id").reset_index(drop=True)
+    build_faiss_index(model, products_df, index_path=args.index, meta_path=args.meta, device=device)
     logger.info("Index saved: %s, meta: %s", args.index, args.meta)
     return 0
 

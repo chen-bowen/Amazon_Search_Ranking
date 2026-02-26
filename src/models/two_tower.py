@@ -23,6 +23,13 @@ def _tokenize(encoder: SentenceTransformer, texts: List[str], device: torch.devi
     return {k: v.to(device) for k, v in features.items() if isinstance(v, torch.Tensor)}
 
 
+class _MockModelCard:
+    """Minimal stub so SentenceTransformers evaluators can attach metrics."""
+
+    def set_evaluation_metrics(self, *args, **kwargs) -> None:  # type: ignore[override]
+        return None
+
+
 class TwoTowerEncoder(nn.Module):
     """
     Query and product towers with optional shared backbone.
@@ -46,6 +53,9 @@ class TwoTowerEncoder(nn.Module):
         super().__init__()
         self.normalize = normalize
         self.similarity_fn_name = SIMILARITY_FN_NAME
+        # Some SentenceTransformers evaluators expect `model.model_card_data.set_evaluation_metrics(...)`.
+        # Provide a cheap stub so they can call into it without errors.
+        self.model_card_data = _MockModelCard()
         if shared:
             # Shared backbone: both towers use the same SentenceTransformer instance.
             self.query_encoder = SentenceTransformer(model_name)
@@ -82,6 +92,7 @@ class TwoTowerEncoder(nn.Module):
             device=str(device),
             convert_to_tensor=True,
             normalize_embeddings=self.normalize,
+            show_progress_bar=False,
         )
         return emb
 
@@ -102,6 +113,7 @@ class TwoTowerEncoder(nn.Module):
             device=str(device),
             convert_to_tensor=True,
             normalize_embeddings=self.normalize,
+            show_progress_bar=False,
         )
         return emb
 
