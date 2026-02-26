@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from src.constants import DATA_DIR, DEFAULT_MODEL_NAME
 from src.data.load_data import load_esci
 from src.models.two_tower import TwoTowerEncoder
 
@@ -20,9 +21,6 @@ try:
     import faiss
 except ImportError:
     faiss = None
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = REPO_ROOT / "data"
 
 
 def build_faiss_index(
@@ -90,7 +88,7 @@ def main() -> int:
     )
     p.add_argument("--index", type=str, default="data/product.index")
     p.add_argument("--meta", type=str, default="data/product_meta.parquet")
-    p.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2")
+    p.add_argument("--model-name", type=str, default=DEFAULT_MODEL_NAME)
     args = p.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TwoTowerEncoder(model_name=args.model_name, shared=False, normalize=True)

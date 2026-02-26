@@ -9,13 +9,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-logger = logging.getLogger(__name__)
-
+from src.constants import DEFAULT_MODEL_NAME, REPO_ROOT
 from src.models.two_tower import TwoTowerEncoder
 from src.retrieval.build_index import load_index_and_meta
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = REPO_ROOT / "data"
+logger = logging.getLogger(__name__)
 
 
 def search(
@@ -64,7 +62,7 @@ def main() -> int:
             cfg = yaml.safe_load(f) or {}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TwoTowerEncoder(
-        model_name=args.model_name or cfg.get("model_name", "all-MiniLM-L6-v2"),
+        model_name=args.model_name or cfg.get("model_name", DEFAULT_MODEL_NAME),
         shared=False,
         normalize=True,
     )

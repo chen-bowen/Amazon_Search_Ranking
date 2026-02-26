@@ -15,14 +15,12 @@ import torch
 from sentence_transformers.evaluation import InformationRetrievalEvaluator
 from torch.utils.data import Dataset, DataLoader
 
+from src.constants import DATA_DIR, DEFAULT_MODEL_NAME, REPO_ROOT
 from src.data.load_data import load_esci, prepare_train_test
 from src.data.query_augment import augment_query
 from src.models.two_tower import TwoTowerEncoder
 from src.training.loss import contrastive_loss_with_reweighting
 from tqdm.auto import tqdm
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = REPO_ROOT / "data"
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +128,7 @@ def run_training(
     train_df: pd.DataFrame | None = None,
     data_dir: Path | str | None = None,
     *,
-    model_name: str = "all-MiniLM-L12-v2",
+    model_name: str = DEFAULT_MODEL_NAME,
     shared_tower: bool = False,
     batch_size: int = 64,
     epochs: int = 3,
