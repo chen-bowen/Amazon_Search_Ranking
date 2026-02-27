@@ -1,0 +1,11 @@
+# Cross-encoder reranker (ESCI approach: MSE loss on gains)
+data_dir: data
+model_name: cross-encoder/ms-marco-MiniLM-L-12-v2
+product_col: product_text  # or product_title for ESCI-exact
+save_path: data/reranker
+epochs: 1
+batch_size: 32
+lr: 7.0e-6
+warmup_steps: 5000
+evaluation_steps: 5000
+use_saved_splits: false

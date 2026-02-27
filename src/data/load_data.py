@@ -167,15 +167,18 @@ def load_esci(
 def prepare_train_test(
     df: pd.DataFrame | None = None,
     data_dir: Path | str | None = None,
+    *,
+    small_version: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Return (train_df, test_df) by splitting on the "split" column.
     Provide either a preloaded dataframe or a data_dir to load via load_esci.
+    small_version: if True, use Task 1 reduced set (~48k queries, easier retrieval).
     """
     if df is None:
         if data_dir is None:
             data_dir = ESCI_SUBDIR
-        df = load_esci(data_dir=data_dir)
+        df = load_esci(data_dir=data_dir, small_version=small_version)
     if "split" not in df.columns:
         raise ValueError('DataFrame has no "split" column; cannot split train/test.')
     train = df[df["split"] == "train"].copy()

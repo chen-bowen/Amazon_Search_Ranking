@@ -7,20 +7,20 @@ from __future__ import annotations
 import argparse
 import logging
 import random
-import yaml
 import warnings
 from collections import deque
 from pathlib import Path
 
 import pandas as pd
 import torch
+import yaml
 from sentence_transformers.evaluation import InformationRetrievalEvaluator
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 
 from src.constants import DATA_DIR, DEFAULT_MODEL_NAME, REPO_ROOT
-from src.data.load_data import load_esci, prepare_train_test
+from src.data.load_data import prepare_train_test
 from src.data.query_augment import augment_query
-from src.models.two_tower import TwoTowerEncoder
+from src.models.retriever import BiEncoderRetriever
 from src.utils import setup_colored_logging
 from src.training.loss import contrastive_loss_with_reweighting
 from tqdm.auto import tqdm
@@ -39,9 +39,16 @@ class QueryProductDataset(Dataset):
         augment_prob: float = 0.25,
     ):
         # Filter to positive pairs: relevance >= 2 (E=4, S=2, C=3; excludes I=1)
-        self.df = df[df["relevance"] >= min_relevance][["query", "product_text"]].drop_duplicates().reset_index(drop=True)
+        pos = df[df["relevance"] >= min_relevance][["query_id", "query", "product_text"]].drop_duplicates()
+        self.df = pos.reset_index(drop=True)
         self.use_query_augment = use_query_augment
         self.augment_prob = augment_prob
+        # Group indices by query_id for unique-query batching (avoids in-batch false negatives)
+        self._qid_to_indices: dict[str, list[int]] = {}
+        for i, qid in enumerate(self.df["query_id"].astype(str)):
+            # Append each row index to its query's list (one query can have multiple products)
+            self._qid_to_indices.setdefault(qid, []).append(i)
+        self._query_ids = list(self._qid_to_indices.keys())
 
     def __len__(self) -> int:
         return len(self.df)
@@ -49,9 +56,127 @@ class QueryProductDataset(Dataset):
     def __getitem__(self, i: int) -> tuple[str, str]:
         row = self.df.iloc[i]
         query = str(row["query"])
+        # Optionally substitute partial query with synonym (data augmentation)
         if self.use_query_augment:
             query = augment_query(query, prob=self.augment_prob)
         return query, str(row["product_text"])
+
+
+class UniqueQueryBatchSampler(Sampler[list[int]]):
+    """
+    Ensures at most one (query, product) pair per query per batch.
+    Fixes in-batch false negatives: when query A has products p1,p2, both relevant,
+    we must not treat (A,p2) as negative when (A,p1) is the positive.
+
+    Iterates over ALL (query, product) pairs so the same query can appear in
+    different batches with different products. Each batch has unique queries only.
+    """
+
+    def __init__(
+        self,
+        qid_to_indices: dict[str, list[int]],
+        batch_size: int,
+        shuffle: bool = True,
+        seed: int = 42,
+    ):
+        self.qid_to_indices = qid_to_indices
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.seed = seed
+        self.epoch = 0
+        # Flatten to (dataset_index, query_id) for every (query, product) pair
+        self._pairs: list[tuple[int, str]] = [(idx, qid) for qid, indices in qid_to_indices.items() for idx in indices]
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def _fill_from_deferred(
+        self,
+        batch: list[int],
+        seen_qids: set[str],
+        deferred: list[tuple[int, str]],
+    ) -> None:
+        """
+        Move deferred items into batch until full or saturated.
+
+        Deferred = pairs we couldn't add earlier because their query was already
+        in the batch. When we start a new batch, we try to drain them. Saturated
+        when all deferred share a qid already in the current batch.
+
+        Parameters
+        ----------
+        batch : list[int]
+            List of indices to fill.
+        seen_qids : set[str]
+            Set of query IDs already in batch.
+        deferred : list[tuple[int, str]]
+            Queue of (index, query_id) pairs waiting for a batch with room.
+        """
+        # Drain deferred items until batch is full or saturated
+        while deferred and len(batch) < self.batch_size:
+            d_idx, d_qid = deferred.pop(0)
+            if d_qid not in seen_qids:
+                batch.append(d_idx)
+                seen_qids.add(d_qid)
+            else:
+                deferred.append((d_idx, d_qid))
+                if all(q in seen_qids for _, q in deferred):
+                    break
+
+    def __iter__(self):
+        """
+        Iterate over batches of (query, product) pairs. Could be used as sliceable iterator.
+
+        Returns
+        -------
+        Iterator[list[int]]
+            Iterator of lists of indices.
+        """
+        rng = random.Random(self.seed + self.epoch)
+        pairs = list(self._pairs)
+        if self.shuffle:
+            rng.shuffle(pairs)
+
+        batch: list[int] = []
+        seen_qids: set[str] = set()
+        # Pairs we couldn't add because their query is already in the batch; drained when we start a new batch
+        deferred: list[tuple[int, str]] = []
+
+        # Iterate over pairs and add to batch, ensuring one (query, product) per query per batch
+        for idx, qid in pairs:
+            if qid in seen_qids:
+                deferred.append((idx, qid))
+                continue
+            batch.append(idx)
+            seen_qids.add(qid)
+            # If batch is full, yield it and reset
+            if len(batch) >= self.batch_size:
+                yield batch
+                batch, seen_qids = [], set()
+                self._fill_from_deferred(batch, seen_qids, deferred)
+
+        # If there are any deferred items, yield the batch and reset
+        while deferred:
+            if batch:
+                yield batch
+            batch, seen_qids = [], set()
+            self._fill_from_deferred(batch, seen_qids, deferred)
+
+        if batch:
+            yield batch
+
+    def __len__(self) -> int:
+        """
+        Number of batches in the dataset. Could be used as len(batch_sampler).
+
+        Returns
+        -------
+        int
+            Number of batches.
+        """
+        n_pairs = len(self._pairs)
+        # Ceiling division; at least 1 batch
+        return max(1, (n_pairs + self.batch_size - 1) // self.batch_size)
 
 
 def resolve_device(preferred: str | torch.device | None = None) -> torch.device:
@@ -62,7 +187,7 @@ def resolve_device(preferred: str | torch.device | None = None) -> torch.device:
     3) available MPS,
     4) CPU.
     """
-    # Normalize string vs torch.device
+    # Normalize string vs torch.device for uniform handling
     if isinstance(preferred, torch.device):
         preferred_str = preferred.type
     else:
@@ -107,10 +232,12 @@ def build_ir_eval_data(eval_df: pd.DataFrame, min_relevance: int = 2) -> tuple[d
     """
     if "product_id" not in eval_df.columns:
         raise ValueError("eval_df must have 'product_id' for InformationRetrievalEvaluator (e.g. from load_esci).")
+    # One query string per query_id (first occurrence)
     queries = eval_df.groupby("query_id")["query"].first().astype(str).to_dict()
     queries = {str(k): v for k, v in queries.items()}
     corpus_df = eval_df[["product_id", "product_text"]].drop_duplicates("product_id")
     corpus = {str(pid): str(text) for pid, text in zip(corpus_df["product_id"], corpus_df["product_text"])}
+    # Map query_id -> set of product_ids with relevance >= min_relevance
     relevant_docs: dict[str, set[str]] = {}
     for _, row in eval_df.iterrows():
         if row["relevance"] >= min_relevance:
@@ -128,36 +255,35 @@ def subsample_ir_eval(
     max_corpus: int = 50000,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, set[str]]]:
     """
-    Optionally subsample IR eval artifacts to speed up InformationRetrievalEvaluator.
+    Subsample IR eval so mid-epoch eval is faster but metrics stay meaningful.
 
-    - First, downsample queries to at most `max_queries` (uniform without replacement).
-    - Then, downsample corpus to at most `max_corpus` and drop any query whose
-      relevant_docs become empty after corpus subsampling.
+    - Subsample queries to at most max_queries.
+    - Build corpus as: all relevant product_ids for those queries, then fill to
+      max_corpus with random other products. This ensures every sampled query has
+      its relevant docs in the corpus (avoids artificially zero metrics).
     """
     rng = random.Random(42)
 
-    # Subsample queries
+    # Subsample queries (keeps eval fast while preserving metric validity)
     query_ids = list(queries.keys())
     if len(query_ids) > max_queries:
         keep_q = set(rng.sample(query_ids, max_queries))
         queries = {qid: text for qid, text in queries.items() if qid in keep_q}
         relevant_docs = {qid: docs for qid, docs in relevant_docs.items() if qid in keep_q}
 
-    # Subsample corpus
-    corpus_ids = list(corpus.keys())
-    if len(corpus_ids) > max_corpus:
-        keep_c = set(rng.sample(corpus_ids, max_corpus))
-        corpus = {cid: text for cid, text in corpus.items() if cid in keep_c}
-        # Filter relevant_docs to kept corpus ids and drop queries with no remaining positives
-        new_relevant: dict[str, set[str]] = {}
-        for qid, docs in relevant_docs.items():
-            kept_docs = docs & keep_c
-            if kept_docs:
-                new_relevant[qid] = kept_docs
-        relevant_docs = new_relevant
-
-        # Also drop any queries that lost all relevant docs
-        queries = {qid: text for qid, text in queries.items() if qid in relevant_docs}
+    # Corpus must include all relevant docs for sampled queries, then fill to max_corpus
+    must_have = set()
+    for docs in relevant_docs.values():
+        must_have |= docs
+    rest_ids = [cid for cid in corpus if cid not in must_have]
+    rng.shuffle(rest_ids)
+    # Fill remaining slots with random products so corpus size hits max_corpus
+    need = max(0, max_corpus - len(must_have))
+    keep_c = must_have | set(rest_ids[:need])
+    corpus = {cid: corpus[cid] for cid in keep_c}
+    # Restrict relevant_docs to products in corpus; drop queries with no relevant docs left
+    relevant_docs = {qid: (docs & keep_c) for qid, docs in relevant_docs.items() if (docs & keep_c)}
+    queries = {qid: text for qid, text in queries.items() if qid in relevant_docs}
 
     return queries, corpus, relevant_docs
 
@@ -234,6 +360,7 @@ def build_ir_evaluators(
 
 
 def collate_query_product(batch: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+    # Unzip [(q1,p1), (q2,p2), ...] -> ([q1,q2,...], [p1,p2,...])
     """
     Collate function: convert list of (query, product) tuples into separate lists.
 
@@ -251,8 +378,9 @@ def collate_query_product(batch: list[tuple[str, str]]) -> tuple[list[str], list
     -----
     Unzip: [(q1,p1), (q2,p2), ...] -> ([q1,q2,...], [p1,p2,...])
     """
-    queries, products = zip(*batch)  # Unzip: [(q1,p1), (q2,p2), ...] -> ([q1,q2,...], [p1,p2,...])
-    return list(queries), list(products)  # Convert tuples to lists
+    # zip(*batch) transposes list of tuples into separate lists
+    queries, products = zip(*batch)
+    return list(queries), list(products)
 
 
 def run_training(
@@ -272,7 +400,8 @@ def run_training(
     device: str | torch.device = "cuda",
     save_path: Path | str | None = None,
     use_saved_splits: bool = False,
-) -> TwoTowerEncoder:
+    small_version: bool = False,
+) -> BiEncoderRetriever:
     """
     Main training function: load data, create model, train with contrastive loss.
 
@@ -320,6 +449,7 @@ def run_training(
     """
     eval_df: pd.DataFrame | None = None
     base = Path(data_dir or DATA_DIR)
+    # Load from parquet if available, else prepare from raw ESCI
     if train_df is None:
         train_path = base / "esci_train.parquet"
         use_saved = use_saved_splits and train_path.exists()
@@ -330,14 +460,12 @@ def run_training(
                 eval_df = pd.read_parquet(eval_path)
         else:
             # Load raw ESCI from base data directory (expects parquets in `data/`).
-            _df = load_esci(data_dir=base)
-            train_df, eval_df = prepare_train_test(df=_df)
+            train_df, eval_df = prepare_train_test(data_dir=base, small_version=small_version)
 
-    # Resolve device (preferring explicit choice, then CUDA, then MPS, then CPU).
     device = resolve_device(device)
 
-    # Two-tower encoder outputs query/product embeddings of shape [B, D].
-    model = TwoTowerEncoder(model_name=model_name, shared=shared_tower, normalize=True)
+    # Bi-encoder: separate query/product encoders; outputs embeddings [B, D]
+    model = BiEncoderRetriever(model_name=model_name, shared=shared_tower, normalize=True)
     model = model.to(device)
     # Wrap the positive (query, product_text) pairs in a Dataset so we can batch them.
     dataset = QueryProductDataset(
@@ -346,14 +474,18 @@ def run_training(
         augment_prob=augment_prob,
     )
 
-    # Standard PyTorch DataLoader over (query, product_text) pairs.
-    dataloader = DataLoader(
-        dataset,
+    # Batch sampler ensures one (query, product) per query per batch (avoids in-batch false negatives).
+    batch_sampler = UniqueQueryBatchSampler(
+        dataset._qid_to_indices,
         batch_size=batch_size,
         shuffle=True,
+        seed=42,
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_sampler=batch_sampler,
         collate_fn=collate_query_product,
         num_workers=0,
-        drop_last=True,
     )
 
     # Pretty-print training configuration and dataset statistics.
@@ -370,9 +502,12 @@ def run_training(
     logger.info("  augment_prob     : %.2f", augment_prob)
     logger.info("  device           : %s", device)
     logger.info("  use_saved_splits : %s (False = load full ESCI from raw; True = use esci_*.parquet if present)", use_saved_splits)
+    logger.info("  small_version    : %s (True = Task 1 reduced set, ~48k queries; False = full ~130k)", small_version)
     logger.info("Dataset statistics:")
     logger.info("  rows (raw)       : %d", len(train_df))
     logger.info("  rows (positives) : %d", len(dataset))
+    logger.info("  unique queries   : %d", len(dataset._qid_to_indices))
+    logger.info("  pairs per epoch  : %d (all pairs used; one query per batch to avoid in-batch false negatives)", len(dataset))
 
     # Optional full-ranking evaluators on the held-out eval_df (nDCG@10, MRR@10, etc.).
     # We use a subsampled evaluator mid-epoch for cheap feedback, and a full evaluator
@@ -385,10 +520,12 @@ def run_training(
 
     # Optimizer over all encoder parameters.
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    # Warmup + cosine LR schedule using standard PyTorch schedulers.
+
+    # Warmup (10% of steps) then cosine decay to 0
     total_steps = max(len(dataloader) * epochs, 1)
     warmup_steps = max(int(0.1 * total_steps), 1)
     cosine_steps = max(total_steps - warmup_steps, 1)
+    # Linear warmup from 0.001x to 1x, then cosine decay
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=1e-3, total_iters=warmup_steps)
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cosine_steps)
     scheduler = torch.optim.lr_scheduler.SequentialLR(
@@ -397,8 +534,8 @@ def run_training(
         milestones=[warmup_steps],
     )
     model.train()
-    loss_window = 50  # how many recent steps to include in the "last_50" moving average
-    global_step = 0  # counts optimizer steps across all epochs (used by the LR scheduler)
+    loss_window = 50
+    global_step = 0
 
     # Global progress bar over all epochs / steps.
     steps_per_epoch = len(dataloader)
@@ -410,17 +547,18 @@ def run_training(
         position=0,
     )
 
-    # Main training loop over epochs.
     for epoch in range(epochs):
+        # Different shuffle order per epoch (used by UniqueQueryBatchSampler)
+        batch_sampler.set_epoch(epoch)
         total_loss = 0.0  # running sum of loss over this epoch
         n_batches = 0  # number of batches seen in this epoch
         grad_norm_sum = 0.0  # running sum of gradient norms (for avg_grad_norm)
         loss_smooth = 0.0  # online mean of loss over the epoch
 
-        # Stores the most recent `loss_window` losses for the "last_50" metric.
+        # Rolling window for "last N" loss average
         loss_last = deque(maxlen=loss_window)
 
-        # Second tqdm instance used as a pure stats line (no bar), placed under the main bar.
+        # Stats line (no progress bar) below main bar
         stats_bar = tqdm(
             total=1,
             bar_format="{desc}",
@@ -428,15 +566,15 @@ def run_training(
             position=1,
         )
         for queries, products in dataloader:
-            # Forward pass: compute query/product embeddings.
             opt.zero_grad()
+            # Forward: encode queries and products -> [B, D] embeddings
             q_emb, p_emb = model(
                 query_strings=queries,
                 product_strings=products,
                 device=device,
             )
 
-            # Compute contrastive loss with reweighting
+            # Contrastive loss (in-batch negatives) with optional hard-negative reweighting
             loss = contrastive_loss_with_reweighting(
                 q_emb,
                 p_emb,
@@ -444,17 +582,15 @@ def run_training(
                 hard_weight_power=hard_weight_power,
                 temperature=temperature,
             )
-            # Backward pass: compute gradients and update model parameters.
             loss.backward()
 
-            # Compute global gradient L2 norm for monitoring (no clipping).
+            # L2 norm of all gradients (for logging; no gradient clipping)
             total_grad_sq = 0.0
             for p in model.parameters():
                 if p.grad is not None:
                     total_grad_sq += p.grad.detach().pow(2).sum().item()
             grad_norm = total_grad_sq**0.5
 
-            # Update model parameters and step the LR scheduler.
             opt.step()
             scheduler.step()
             global_step += 1
@@ -466,22 +602,20 @@ def run_training(
             grad_norm_sum += grad_norm
             loss_last.append(loss_value)
 
-            # Update the moving average of loss.
+            # Online exponential moving average of loss
             loss_smooth = loss_smooth + (loss_value - loss_smooth) / min(n_batches, loss_window)
             avg_last_50 = sum(loss_last) / len(loss_last) if loss_last else 0.0
             current_lr_step = opt.param_groups[0]["lr"]
 
-            # Two-line display: main tqdm bar + separate stats line that is overwritten in-place.
             stats_bar.set_description_str(
                 f"Epoch {epoch + 1}/{epochs} | loss={loss_smooth:.4f},  last50={avg_last_50:.4f}, |g|={grad_norm:.4f}, lr={current_lr_step:.2e}"
             )
-            # Advance global progress bar.
             progress.update(1)
-            # Optional mid-epoch eval: every 5000 batches, run IR evaluator on the subsample and log metrics.
+            # Mid-epoch IR eval on subsample (every 5000 batches)
             if ir_evaluator_mid is not None and n_batches % 5000 == 0:
-                # Use tqdm's own write so the message appears on a clean line under the bar.
                 progress.write(f"Information Retrieval eval (mid-epoch, subsample): epoch {epoch + 1}, step {global_step} ...")
                 eval_results_mid = ir_evaluator_mid(model, epoch=epoch + 1, steps=global_step)
+                # Keys from sentence_transformers IR evaluator (name + metric)
                 ndcg_key = "esci-eval_cosine_ndcg@10"
                 mrr_key = "esci-eval_cosine_mrr@10"
                 acc10_key = "esci-eval_cosine_accuracy@10"
@@ -510,11 +644,11 @@ def run_training(
             avg_grad_norm,
             current_lr,
         )
-        # full-ranking evaluation on the held-out eval_df (nDCG@10, MRR@10) using the full evaluator.
+        # End-of-epoch full IR eval (nDCG@10, MRR@10, etc.)
         if ir_evaluator_full is not None:
-            # Use tqdm.write so the eval message does not collide with any bars.
             tqdm.write(f"Information Retrieval eval (end of epoch {epoch + 1}/{epochs}, full eval set) ...")
             eval_results = ir_evaluator_full(model, epoch=epoch + 1)
+            # Same key names as mid-epoch evaluator
             ndcg_key = "esci-eval_cosine_ndcg@10"
             mrr_key = "esci-eval_cosine_mrr@10"
             acc10_key = "esci-eval_cosine_accuracy@10"
@@ -529,12 +663,11 @@ def run_training(
                 eval_results.get(map10_key, 0.0),
             )
     progress.close()
-    if save_path is not None:  # If save path provided
-        save_path = Path(save_path)  # Convert to Path object
-        save_path.parent.mkdir(parents=True, exist_ok=True)  # Create parent directories if needed
-        # Save model checkpoint: state dict and model name
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model_state": model.state_dict(), "model_name": model_name}, save_path)
-    return model  # Return trained model
+    return model
 
 
 def main() -> int:
@@ -573,8 +706,7 @@ def main() -> int:
             "sentence_transformers",
         ],
     )
-    # Suppress verbose HF unauthenticated warnings.
-    # Filter the common unauthenticated warning from huggingface_hub.
+    # Suppress HuggingFace unauthenticated-request warnings
     warnings.filterwarnings(
         "ignore",
         message=".*unauthenticated requests to the HF Hub.*",
@@ -666,20 +798,25 @@ def main() -> int:
         action="store_true",
         help="Use esci_train.parquet / esci_test.parquet if present; default is to load full ESCI from raw",
     )
+    p.add_argument(
+        "--small-version",
+        action="store_true",
+        help="Use Task 1 reduced set (~48k queries); default is full ESCI (~130k)",
+    )
     args = p.parse_args()
     cfg: dict = {}
     config_path = REPO_ROOT / args.config
     if config_path.exists():
         with open(config_path) as f:
             cfg = yaml.safe_load(f) or {}
+    # CLI overrides config overrides defaults
     data_dir = Path(args.data_dir or cfg.get("data_dir") or DATA_DIR)
-    # Call training function with args/config merged (CLI args override config)
     run_training(
-        data_dir=data_dir,  # Data directory
-        model_name=args.model_name or cfg.get("model_name", "all-MiniLM-L12-v2"),  # Model name
-        shared_tower=args.shared or cfg.get("shared_tower", False),  # Shared tower flag
-        batch_size=args.batch_size if args.batch_size is not None else cfg.get("batch_size", 64),  # Batch size
-        epochs=args.epochs if args.epochs is not None else cfg.get("epochs", 3),  # Number of epochs
+        data_dir=data_dir,
+        model_name=args.model_name or cfg.get("model_name", "all-MiniLM-L12-v2"),
+        shared_tower=args.shared or cfg.get("shared_tower", False),
+        batch_size=args.batch_size if args.batch_size is not None else cfg.get("batch_size", 64),
+        epochs=args.epochs if args.epochs is not None else cfg.get("epochs", 3),
         lr=args.lr if args.lr is not None else cfg.get("lr", 2e-5),
         temperature=args.temperature if args.temperature is not None else cfg.get("temperature", 1.0),
         reweight_hard=not args.no_reweight_hard and cfg.get("reweight_hard", True),
@@ -688,6 +825,7 @@ def main() -> int:
         augment_prob=args.augment_prob if args.augment_prob is not None else cfg.get("augment_prob", 0.25),
         save_path=args.save or cfg.get("save_path", "data/model.pt"),
         use_saved_splits=args.use_saved_splits or cfg.get("use_saved_splits", False),
+        small_version=args.small_version or cfg.get("small_version", False),
     )
     return 0
 

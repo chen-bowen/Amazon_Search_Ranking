@@ -30,16 +30,16 @@ class _MockModelCard:
         return None
 
 
-class TwoTowerEncoder(nn.Module):
+class BiEncoderRetriever(nn.Module):
     """
     Query and product towers with optional shared backbone.
 
     Notation used in comments:
     - N: number of text inputs passed to an encoder (e.g. number of queries at inference time).
-    - B: batch size during training (number of (query, product) pairs in a mini‑batch).
+    - B: batch size during training (number of (query, product) pairs in a mini-batch).
     - D: embedding dimension of the SentenceTransformer backbone (e.g. 384 for MiniLM).
 
-    All outputs are L2-normalized D‑dimensional vectors and we use dot product
+    All outputs are L2-normalized D-dimensional vectors and we use dot product
     (equivalent to cosine for normalized vectors) as the similarity.
     """
 
