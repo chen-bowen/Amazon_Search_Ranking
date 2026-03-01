@@ -1,6 +1,6 @@
 """
 Cross-encoder reranker for (query, product) pairs (ESCI-style).
-Scores pairs jointly; used as second stage after bi-encoder retrieval.
+Scores pairs jointly for ESCI Task 1 (query-product ranking).
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ import torch.nn as nn
 
 from sentence_transformers.cross_encoder import CrossEncoder
 
-
-DEFAULT_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+from src.constants import DEFAULT_RERANKER_MODEL, MODEL_CACHE_DIR
 
 
 class CrossEncoderReranker(nn.Module):
@@ -25,7 +24,7 @@ class CrossEncoderReranker(nn.Module):
     - B: batch size (number of pairs to score).
     - Output: scalar relevance score per pair.
 
-    Used as second stage after bi-encoder retrieval.
+    Can score any (query, product) candidate list for ranking.
     """
 
     def __init__(
@@ -34,6 +33,7 @@ class CrossEncoderReranker(nn.Module):
         *,
         max_length: int = 512,
         device: str | torch.device | None = None,
+        cache_folder: str | Path | None = MODEL_CACHE_DIR,
     ):
         super().__init__()
         if CrossEncoder is None:
@@ -42,11 +42,13 @@ class CrossEncoderReranker(nn.Module):
         if isinstance(device, str):
             device = torch.device(device)
         self._device = device
+        cache = str(cache_folder) if cache_folder else None
         self._model = CrossEncoder(
             model_name,
             num_labels=1,
             max_length=max_length,
             device=str(device),
+            cache_folder=cache,
         )
 
     @classmethod
@@ -79,7 +81,7 @@ class CrossEncoderReranker(nn.Module):
         self = cls.__new__(cls)
         nn.Module.__init__(self)
         self._device = device
-        self._model = CrossEncoder(str(path), device=str(device))
+        self._model = CrossEncoder(str(path), device=str(device), local_files_only=True)
         return self
 
     def save(self, path: str | Path) -> None:
@@ -158,6 +160,7 @@ def load_reranker(
     model_path: str | Path | None = None,
     model_name: str = DEFAULT_RERANKER_MODEL,
     device: str | torch.device | None = None,
+    cache_folder: str | Path | None = MODEL_CACHE_DIR,
 ) -> CrossEncoderReranker:
     """
     Load a reranker. If model_path exists, load from disk; else use pretrained model_name.
@@ -178,4 +181,4 @@ def load_reranker(
     path = Path(model_path) if model_path else None
     if path and path.exists():
         return CrossEncoderReranker.from_pretrained(path, device=device)
-    return CrossEncoderReranker(model_name=model_name, device=device)
+    return CrossEncoderReranker(model_name=model_name, device=device, cache_folder=cache_folder)

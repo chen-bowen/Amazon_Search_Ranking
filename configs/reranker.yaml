@@ -8,4 +8,3 @@ batch_size: 32
 lr: 7.0e-6
 warmup_steps: 5000
 evaluation_steps: 5000
-use_saved_splits: false

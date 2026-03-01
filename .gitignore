@@ -10,6 +10,7 @@ venv/
 .python-version
 
 # Data and artifacts
+data/.model_cache/
 data/*.parquet
 data/*.csv
 data/esci-data/
