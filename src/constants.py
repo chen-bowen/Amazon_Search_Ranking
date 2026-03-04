@@ -14,4 +14,3 @@ DEFAULT_EVAL_K = 10
 
 # ESCI label -> gain for nDCG (paper: E=1.0, S=0.1, C=0.01, I=0.0)
 ESCI_LABEL2GAIN = {"E": 1.0, "S": 0.1, "C": 0.01, "I": 0.0}
-

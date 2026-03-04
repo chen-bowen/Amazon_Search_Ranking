@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from src.constants import ESCI_LABEL2GAIN
 

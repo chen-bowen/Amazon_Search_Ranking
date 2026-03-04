@@ -4,10 +4,9 @@ Constants and helpers for ESCI data loading and product text expansion.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pandas as pd
-
+from src.constants import DATA_DIR
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -22,7 +21,6 @@ esci_label2relevance_pos = {
 }
 
 # Project paths (from repo root)
-from src.constants import DATA_DIR, REPO_ROOT
 ESCI_SUBDIR = DATA_DIR
 
 # Max length per field when building product text (keeps input within model limits)

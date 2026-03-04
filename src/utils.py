@@ -72,4 +72,3 @@ def setup_colored_logging(
     logging.root.handlers.clear()
     logging.root.addHandler(handler)
     logging.root.setLevel(level)
-
