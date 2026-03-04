@@ -11,6 +11,7 @@ venv/
 
 # Data and artifacts
 data/.model_cache/
+data/reranker/
 data/*.parquet
 data/*.csv
 data/esci-data/
