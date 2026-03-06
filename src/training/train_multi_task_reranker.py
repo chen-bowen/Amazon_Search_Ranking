@@ -176,15 +176,41 @@ class MultiTaskTrainer:
         """
         Orchestrate training and evaluation of the multi-task reranker.
         """
-        # Setup phase
+        logger.info("[Step 1/6] Loading data splits...")
         self._load_splits()
+        assert self.train_df is not None and self.val_df is not None and self.test_df is not None
+        logger.info(
+            "  -> train: %d rows, val: %d rows, test: %d rows",
+            len(self.train_df),
+            len(self.val_df),
+            len(self.test_df),
+        )
+
+        logger.info("[Step 2/6] Building model and loss...")
         self._maybe_select_device()
         self._setup_model()
+        logger.info("  -> Loading base model: %s", self.model_name)
+
+        logger.info("[Step 3/6] Building dataloader...")
         self.train_dl = self._build_dataloader()
+        assert self.train_dl is not None
+        logger.info("  -> batches per epoch: %d, drop_last: True", len(self.train_dl))
+
+        logger.info("[Step 4/6] Setting up evaluator and training config...")
         self._setup_output_dir()
         self._setup_evaluator()
         self._setup_optim()
-        # Training and evaluation
+        eval_status = "enabled" if self.evaluator is not None else "disabled"
+        logger.info("  -> Evaluator: %s", eval_status)
+        if self.device == "mps":
+            logger.info("  -> MPS detected: Apple Silicon GPU")
+
+        logger.info("[Step 5/6] Creating trainer...")
+        logger.info("=============================================================")
+        self._log_data_config()
+        logger.info("=============================================================")
+
+        logger.info("[Step 6/6] Training started (loss and metrics will appear below)...")
         self._train_epochs()
         self._save_final_checkpoint()
         self._run_test_eval()
@@ -200,22 +226,46 @@ class MultiTaskTrainer:
         self.train_df = train_df
         self.val_df = val_df
         self.test_df = test_df
-        logger.info(
-            "Data: data_dir=%s train_rows=%d val_rows=%d test_rows=%d",
-            self.base,
-            len(train_df),
-            len(val_df),
-            len(test_df),
-        )
 
     def _maybe_select_device(self) -> None:
         """
         Prefer MPS (Apple Silicon) when no device specified
         """
-        # Prefer MPS (Apple Silicon) when no device specified
         if self.device is None and torch.backends.mps.is_available():
             self.device = "mps"
-            logger.info("Using MPS (Apple Silicon GPU) for training.")
+
+    def _log_data_config(self) -> None:
+        assert (
+            self.train_df is not None
+            and self.val_df is not None
+            and self.test_df is not None
+        )
+        logger.info("Params")
+        logger.info("------------------------------------------------------------")
+        logger.info("Data prep:")
+        logger.info("  data_dir: %s", self.base)
+        logger.info("  product_col: %s", self.product_col)
+        logger.info("  small_version: %s", self.small_version)
+        logger.info("  val_frac: %s", self.val_frac)
+        logger.info("  n_train_rows: %d", len(self.train_df))
+        logger.info("  n_val_rows: %d", len(self.val_df))
+        logger.info("  n_test_rows: %d", len(self.test_df))
+        logger.info("------------------------------------------------------------")
+        logger.info("Training:")
+        logger.info("  model_name: %s", self.model_name)
+        logger.info("  device: %s", self.device or "auto")
+        logger.info("  save_path: %s", self.save_path)
+        logger.info("  num_train_epochs: %d", self.epochs)
+        logger.info("  train_batch_size: %d", self.batch_size)
+        logger.info("  max_seq_length: %d", self.max_length)
+        logger.info("  learning_rate: %g", self.lr)
+        logger.info("  warmup_steps: %d", self.warmup_steps)
+        logger.info("  task_weight_ranking: %g", self.task_weight_ranking)
+        logger.info("  task_weight_esci: %g", self.task_weight_esci)
+        logger.info("  task_weight_substitute: %g", self.task_weight_substitute)
+        logger.info("  evaluation_steps: %d", self.evaluation_steps)
+        logger.info("  eval_max_queries: %s", self.eval_max_queries)
+        logger.info("  recall_at: %d", self.recall_at)
 
     def _setup_model(self) -> None:
         """
