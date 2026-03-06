@@ -1,9 +1,13 @@
-__all__ = ["run_training"]
+__all__ = ["RerankerTrainer", "MultiTaskTrainer"]
 
 
 def __getattr__(name: str):
-    if name == "run_training":
-        from .train_reranker import run_training
+    if name == "RerankerTrainer":
+        from .train_reranker import RerankerTrainer
 
-        return run_training
+        return RerankerTrainer
+    if name == "MultiTaskTrainer":
+        from .train_multi_task_reranker import MultiTaskTrainer
+
+        return MultiTaskTrainer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

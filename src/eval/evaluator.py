@@ -10,10 +10,10 @@ import logging
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import ndcg_score
+from sklearn.metrics import accuracy_score, f1_score, ndcg_score
 from tqdm import tqdm
 
-from src.constants import ESCI_LABEL2GAIN
+from src.constants import ESCI_LABEL2GAIN, ESCI_LABEL2ID
 from src.utils import clear_torch_cache
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,6 @@ def compute_query_metrics(
     dict[str, float]
         Dictionary containing nDCG, MRR, MAP, Recall@k.
     """
-    # Rank items by predicted score (descending)
     gains = y_true.flatten()
     scores = y_score.flatten()
     order = np.argsort(-scores)
@@ -53,28 +52,49 @@ def compute_query_metrics(
 
     # nDCG: uses graded gains (E=1, S=0.1, C=0.01, I=0); discounts by position
     ndcg = float(ndcg_score(y_true, y_score))
+    n_rel = int(binary_rel.sum())
 
-    # MRR: 1 / rank of first relevant item (1-indexed). 0 if none in top-k.
+    mrr = _compute_mrr(ranked_gains, recall_at_k)
+    ap = _compute_map(binary_rel, order, n_rel)
+    recall = _compute_recall(ranked_gains, recall_at_k, n_rel)
+
+    return {"ndcg": ndcg, "mrr": mrr, "map": ap, "recall": recall}
+
+
+def _compute_mrr(ranked_gains: np.ndarray, recall_at_k: int) -> float:
+    """MRR: 1 / rank of first relevant item (1-indexed). 0 if none in top-k."""
     mrr = 0.0
-    for r in range(min(recall_at_k, len(ranked_gains))):
+    limit = min(recall_at_k, len(ranked_gains))
+    for r in range(limit):
         if ranked_gains[r] > 0:
             mrr = 1.0 / (r + 1)
             break
+    return mrr
 
-    # MAP: mean of precision@k for each relevant item when it appears
-    n_rel = int(binary_rel.sum())
-    if n_rel > 0:
-        ranked_binary = binary_rel[order]
-        precisions = np.cumsum(ranked_binary) / np.arange(1, len(ranked_binary) + 1)
-        ap = (precisions * ranked_binary).sum() / n_rel
-    else:
-        ap = 0.0
 
-    # Recall@k: fraction of relevant items in top-k
+def _compute_map(
+    binary_rel: np.ndarray,
+    order: np.ndarray,
+    n_rel: int,
+) -> float:
+    """MAP: mean of precision@k for each relevant item when it appears."""
+    if n_rel <= 0:
+        return 0.0
+    ranked_binary = binary_rel[order]
+    precisions = np.cumsum(ranked_binary) / np.arange(1, len(ranked_binary) + 1)
+    return float((precisions * ranked_binary).sum() / n_rel)
+
+
+def _compute_recall(
+    ranked_gains: np.ndarray,
+    recall_at_k: int,
+    n_rel: int,
+) -> float:
+    """Recall@k: fraction of relevant items in top-k."""
+    if n_rel <= 0:
+        return 0.0
     rel_in_topk = ranked_gains[:recall_at_k] > 0
-    recall = rel_in_topk.sum() / max(n_rel, 1)
-
-    return {"ndcg": ndcg, "mrr": mrr, "map": ap, "recall": recall}
+    return float(rel_in_topk.sum() / n_rel)
 
 
 class ESCIMetricsEvaluator:
@@ -135,27 +155,178 @@ class ESCIMetricsEvaluator:
             "recall": [],
         }
         for query, pairs in tqdm(self._query_data, desc="Eval", unit="query"):
-            # Score each (query, product) pair
-            texts = [[query, p] for p, _ in pairs]
-            y_true = np.array([[self.label2gain.get(lbl, 0.0) for _, lbl in pairs]])
-            scores = model.predict(
-                texts, batch_size=self.batch_size, show_progress_bar=False
-            )
-            if hasattr(scores, "tolist"):
-                scores = scores.tolist()
-            y_score = np.array([[float(s) for s in scores]])
-            m = compute_query_metrics(y_true, y_score, recall_at_k=self.recall_at_k)
+            m = self._score_query(model, query, pairs)
             for k, v in m.items():
                 all_metrics[k].append(v)
+        return self._aggregate_and_log(all_metrics, epoch=epoch, steps=steps)
+
+    def _score_query(
+        self,
+        model,
+        query: str,
+        pairs: list[tuple[str, str]],
+    ) -> dict[str, float]:
+        """Score a single query's pairs and compute metrics."""
+        texts = [[query, p] for p, _ in pairs]
+        y_true = np.array([[self.label2gain.get(lbl, 0.0) for _, lbl in pairs]])
+        scores = model.predict(
+            texts,
+            batch_size=self.batch_size,
+            show_progress_bar=False,
+        )
+        if hasattr(scores, "tolist"):
+            scores = scores.tolist()
+        y_score = np.array([[float(s) for s in scores]])
+        return compute_query_metrics(y_true, y_score, recall_at_k=self.recall_at_k)
+
+    def _aggregate_and_log(
+        self,
+        all_metrics: dict[str, list[float]],
+        *,
+        epoch: int,
+        steps: int,
+    ) -> float:
+        """Aggregate per-query metrics, log, and return nDCG."""
         self._last_metrics = {
             k: float(np.mean(v)) if v else 0.0 for k, v in all_metrics.items()
         }
         msg = (
             f"Eval(epoch={epoch} steps={steps}) "
-            f"nDCG={self._last_metrics['ndcg']:.4f} MRR={self._last_metrics['mrr']:.4f} "
-            f"MAP={self._last_metrics['map']:.4f} Recall@{self.recall_at_k}={self._last_metrics['recall']:.4f}"
+            f"nDCG={self._last_metrics['ndcg']:.4f} "
+            f"MRR={self._last_metrics['mrr']:.4f} "
+            f"MAP={self._last_metrics['map']:.4f} "
+            f"Recall@{self.recall_at_k}={self._last_metrics['recall']:.4f}"
         )
-        tqdm.write(
-            "\n" + msg
-        )  # Leading newline so eval metrics appear on a new line, not after progress bar
+        # Leading newline so eval metrics appear on a new line, not after progress bar
+        tqdm.write("\n" + msg)
         return self._last_metrics["ndcg"]
+
+
+def evaluate_classification_tasks(
+    model,
+    df: pd.DataFrame,
+    *,
+    product_col: str,
+    max_queries: int | None = None,
+    batch_size: int = 32,
+    split_name: str = "val",
+) -> None:
+    """
+    Evaluate ESCI multi-task classification heads on a dataframe.
+
+    Metrics:
+    - Task 2 (4-class ESCI): accuracy and macro F1 over E/S/C/I.
+    - Task 3 (substitute): accuracy and F1 for substitute vs non-substitute.
+
+    The model is expected to expose `predict(pairs)` returning
+    (scores, esci_labels, substitute_probs).
+    """
+    evaluator = ClassificationTaskEvaluator(
+        df=df,
+        product_col=product_col,
+        max_queries=max_queries,
+        batch_size=batch_size,
+        split_name=split_name,
+    )
+    evaluator(model)
+
+
+class ClassificationTaskEvaluator:
+    """
+    Helper to evaluate ESCI multi-task classification heads on a dataframe.
+
+    Computes:
+    - Task 2 (4-class ESCI): accuracy and macro F1 over E/S/C/I.
+    - Task 3 (substitute): accuracy and F1 for substitute vs non-substitute.
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        *,
+        product_col: str,
+        max_queries: int | None,
+        batch_size: int,
+        split_name: str,
+    ) -> None:
+        self._df = df
+        self._product_col = product_col
+        self._max_queries = max_queries
+        self._batch_size = batch_size
+        self._split_name = split_name
+
+    def __call__(self, model) -> None:
+        if self._df.empty:
+            return
+
+        df_eval = self._prepare_eval_data()
+        pairs, true_esci_ids, true_sub = self._build_inputs(df_eval)
+        pred_esci_ids, pred_sub = self._predict(model, pairs)
+        self._compute_and_log_metrics(
+            true_esci_ids=true_esci_ids,
+            pred_esci_ids=pred_esci_ids,
+            true_sub=true_sub,
+            pred_sub=pred_sub,
+            n_examples=len(df_eval),
+        )
+
+    def _prepare_eval_data(self) -> pd.DataFrame:
+        if self._max_queries is not None and "query_id" in self._df.columns:
+            qids = self._df["query_id"].unique()[: self._max_queries]
+            return self._df[self._df["query_id"].isin(qids)].copy()
+        return self._df
+
+    def _build_inputs(
+        self,
+        df_eval: pd.DataFrame,
+    ) -> tuple[list[list[str]], list[int], list[int]]:
+        pairs = [
+            [str(r["query"]), str(r[self._product_col])]
+            for _, r in df_eval.iterrows()
+        ]
+        true_labels = [str(r["esci_label"]) for _, r in df_eval.iterrows()]
+        true_esci_ids = [ESCI_LABEL2ID[lbl] for lbl in true_labels]
+        true_sub = [1 if lbl == "S" else 0 for lbl in true_labels]
+        return pairs, true_esci_ids, true_sub
+
+    def _predict(
+        self,
+        model,
+        pairs: list[list[str]],
+    ) -> tuple[list[int], list[int]]:
+        _, pred_esci_labels, sub_probs = model.predict(
+            pairs,
+            batch_size=self._batch_size,
+        )
+        pred_esci_ids = [ESCI_LABEL2ID[lbl] for lbl in pred_esci_labels]
+        pred_sub = [1 if p >= 0.5 else 0 for p in sub_probs]
+        return pred_esci_ids, pred_sub
+
+    def _compute_and_log_metrics(
+        self,
+        *,
+        true_esci_ids: list[int],
+        pred_esci_ids: list[int],
+        true_sub: list[int],
+        pred_sub: list[int],
+        n_examples: int,
+    ) -> None:
+        esci_acc = accuracy_score(true_esci_ids, pred_esci_ids)
+        esci_f1 = f1_score(true_esci_ids, pred_esci_ids, average="macro")
+        sub_acc = accuracy_score(true_sub, pred_sub)
+        sub_f1 = f1_score(true_sub, pred_sub)
+
+        logger.info(
+            "[%s] Task 2 (ESCI 4-class): accuracy=%.4f macro_F1=%.4f on %d examples",
+            self._split_name,
+            esci_acc,
+            esci_f1,
+            n_examples,
+        )
+        logger.info(
+            "[%s] Task 3 (substitute): accuracy=%.4f F1=%.4f on %d examples",
+            self._split_name,
+            sub_acc,
+            sub_f1,
+            n_examples,
+        )

@@ -5,11 +5,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.data.load_data import prepare_train_test, prepare_train_val_test
+from src.data.load_data import ESCIDataLoader
 
 
 def test_prepare_train_test_from_df() -> None:
-    """prepare_train_test splits on 'split' column."""
+    """ESCIDataLoader.prepare_train_test splits on 'split' column."""
     df = pd.DataFrame(
         {
             "query_id": [1, 2, 3, 4],
@@ -17,7 +17,8 @@ def test_prepare_train_test_from_df() -> None:
             "split": ["train", "train", "test", "test"],
         }
     )
-    train, test = prepare_train_test(df=df)
+    loader = ESCIDataLoader()
+    train, test = loader.prepare_train_test(df=df)
     assert len(train) == 2
     assert len(test) == 2
     assert list(train["split"].unique()) == ["train"]
@@ -27,8 +28,9 @@ def test_prepare_train_test_from_df() -> None:
 def test_prepare_train_test_no_split_column() -> None:
     """Raises ValueError when 'split' column is missing."""
     df = pd.DataFrame({"query_id": [1], "query": ["a"]})
+    loader = ESCIDataLoader()
     with pytest.raises(ValueError, match='no "split" column'):
-        prepare_train_test(df=df)
+        loader.prepare_train_test(df=df)
 
 
 def test_prepare_train_test_empty_splits() -> None:
@@ -40,13 +42,14 @@ def test_prepare_train_test_empty_splits() -> None:
             "split": ["test"],
         }
     )
-    train, test = prepare_train_test(df=df)
+    loader = ESCIDataLoader()
+    train, test = loader.prepare_train_test(df=df)
     assert len(train) == 0
     assert len(test) == 1
 
 
 def test_prepare_train_val_test() -> None:
-    """prepare_train_val_test splits train by query_id; test is held out."""
+    """ESCIDataLoader.prepare_train_val_test splits train by query_id; test is held out."""
     df = pd.DataFrame(
         {
             "query_id": [1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
@@ -54,7 +57,8 @@ def test_prepare_train_val_test() -> None:
             "split": ["train"] * 8 + ["test"] * 2,
         }
     )
-    train, val, test = prepare_train_val_test(df=df, val_frac=0.2, random_state=42)
+    loader = ESCIDataLoader()
+    train, val, test = loader.prepare_train_val_test(df=df, val_frac=0.2, random_state=42)
     assert len(test) == 2
     assert len(train) + len(val) == 8
     train_qids = set(train["query_id"].unique())

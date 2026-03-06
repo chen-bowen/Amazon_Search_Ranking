@@ -37,7 +37,7 @@ Training uses MSE loss: the model predicts a scalar and is trained to match thes
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ 1. Data Preparation                                                         │
-│    Raw parquets → load_esci → prepare_train_val_test → train/val/test DFs  │
+│    Raw parquets → ESCIDataLoader.prepare_train_val_test → train/val/test   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                        │
                                        ▼
@@ -380,7 +380,7 @@ The container serves the app on port 8000. Set `MODEL_PATH` (and optionally `MOD
 uv run pytest tests/ -v
 ```
 
-Tests cover constants, ESCI evaluator, data utils, and load_data (prepare_train_test, prepare_train_val_test).
+Tests cover constants, ESCI evaluator, data utils, and load_data (ESCIDataLoader).
 
 ---
 
@@ -392,7 +392,7 @@ Tests cover constants, ESCI evaluator, data utils, and load_data (prepare_train_
 | **configs/multi_task_reranker.yaml**          | Multi-task learning training: task weights, save_path (checkpoints/multi_task_reranker), lr, batch_size. |
 | **src/api/main.py**                           | FastAPI app: POST /rerank, GET /health; load multi-task learning model at startup.                |
 | **src/constants.py**                          | ESCI gains, ESCI_LABEL2ID, DATA_DIR, MODEL_CACHE_DIR, DEFAULT_RERANKER_MODEL.                     |
-| **src/data/load_data.py**                     | load_esci, prepare_train_test, prepare_train_val_test (split by query_id).                        |
+| **src/data/load_data.py**                     | ESCIDataLoader: load_esci, prepare_train_test, prepare_train_val_test (split by query_id).         |
 | **src/data/utils.py**                         | Product text expansion (get_product_expanded_text).                                               |
 | **src/eval/evaluator.py**                     | ESCIMetricsEvaluator, compute_query_metrics (nDCG, MRR, MAP, Recall@k).                           |
 | **src/eval/eval_reranker.py**                 | Standalone eval script: load model, run on test set, print metrics.                               |

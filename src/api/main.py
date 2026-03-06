@@ -140,12 +140,24 @@ def rerank(body: RerankRequest) -> RerankResponse:
 
     candidates_tuples = [(c.product_id, c.text) for c in body.candidates]
     ranked_tuples = reranker_instance.rerank(
-        body.query, candidates_tuples, batch_size=32
+        body.query,
+        candidates_tuples,
+        batch_size=32,
     )
-    ranked = [
+    ranked = _to_ranked_items(ranked_tuples)
+    return RerankResponse(ranked=ranked)
+
+
+def _to_ranked_items(
+    ranked_tuples: list[tuple[str, float, str, float]],
+) -> list[RankedItem]:
+    """Convert raw reranker outputs into RankedItem models."""
+    return [
         RankedItem(
-            product_id=pid, score=score, esci_class=esci_class, is_substitute=is_sub
+            product_id=pid,
+            score=score,
+            esci_class=esci_class,
+            is_substitute=is_sub,
         )
         for pid, score, esci_class, is_sub in ranked_tuples
     ]
-    return RerankResponse(ranked=ranked)

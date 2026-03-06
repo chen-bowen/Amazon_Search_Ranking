@@ -24,6 +24,51 @@ from src.utils import resolve_device
 logger = logging.getLogger(__name__)
 
 
+def _load_encoder_and_tokenizer(
+    path: Path,
+) -> tuple[AutoModel, AutoTokenizer, int, int]:
+    """
+    Load encoder and tokenizer from a local checkpoint directory.
+
+    Returns encoder, tokenizer, hidden_size, and max_length.
+    """
+    encoder = AutoModel.from_pretrained(str(path), local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
+    hidden_size = encoder.config.hidden_size
+    max_length = getattr(
+        tokenizer,
+        "model_max_length",
+        getattr(encoder.config, "max_position_embeddings", 512),
+    )
+    return encoder, tokenizer, hidden_size, max_length
+
+
+def _load_heads_from_checkpoint(
+    path: Path,
+    device: torch.device,
+    hidden_size: int,
+) -> tuple[nn.Linear, nn.Linear, nn.Linear]:
+    """
+    Build and, if available, load multi-task heads from checkpoint.
+
+    Heads are initialized randomly when no checkpoint file is present.
+    """
+    head_ranking = nn.Linear(hidden_size, 1)
+    head_esci = nn.Linear(hidden_size, 4)
+    head_substitute = nn.Linear(hidden_size, 1)
+
+    heads_path = path / "multi_task_heads.pt"
+    if heads_path.exists():
+        state = torch.load(heads_path, map_location=device, weights_only=True)
+        head_ranking.load_state_dict(state["ranking"])
+        head_esci.load_state_dict(state["esci"])
+        head_substitute.load_state_dict(state["substitute"])
+    else:
+        logger.warning("No multi_task_heads.pt found at %s; head weights are random.", path)
+
+    return head_ranking, head_esci, head_substitute
+
+
 class MultiTaskReranker(nn.Module):
     """
     Cross-encoder with one shared backbone and three heads for ESCI tasks.
@@ -133,32 +178,21 @@ class MultiTaskReranker(nn.Module):
         if not path.exists():
             raise FileNotFoundError(f"Multi-task learning reranker not found: {path}")
 
-        # Load encoder and tokenizer from the same directory (HuggingFace format).
         self = cls.__new__(cls)
         nn.Module.__init__(self)
         self._device = resolve_device(device)
 
-        self.encoder = AutoModel.from_pretrained(str(path), local_files_only=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
-        self._hidden_size = self.encoder.config.hidden_size
-        self._max_length = getattr(
+        (
+            self.encoder,
             self.tokenizer,
-            "model_max_length",
-            getattr(self.encoder.config, "max_position_embeddings", 512),
-        )
-
-        self.head_ranking = nn.Linear(self._hidden_size, 1)
-        self.head_esci = nn.Linear(self._hidden_size, 4)
-        self.head_substitute = nn.Linear(self._hidden_size, 1)
-
-        heads_path = path / "multi_task_heads.pt"
-        if heads_path.exists():
-            state = torch.load(heads_path, map_location=self.device, weights_only=True)
-            self.head_ranking.load_state_dict(state["ranking"])
-            self.head_esci.load_state_dict(state["esci"])
-            self.head_substitute.load_state_dict(state["substitute"])
-        else:
-            logger.warning("No multi_task_heads.pt found at %s; head weights are random.", path)
+            self._hidden_size,
+            self._max_length,
+        ) = _load_encoder_and_tokenizer(path)
+        (
+            self.head_ranking,
+            self.head_esci,
+            self.head_substitute,
+        ) = _load_heads_from_checkpoint(path, self.device, self._hidden_size)
 
         self.to(self.device)
         return self
@@ -247,42 +281,54 @@ class MultiTaskReranker(nn.Module):
         tuple[List[float], List[str], List[float]]
             (scores, esci_classes, substitute_probs), each of length len(pairs).
         """
-        if not pairs:
-            return [], [], []
-
         all_scores: List[float] = []
         all_esci: List[str] = []
         all_sub: List[float] = []
 
+        if not pairs:
+            return all_scores, all_esci, all_sub
+
         for i in range(0, len(pairs), batch_size):
             batch = pairs[i : i + batch_size]
-            enc = self.tokenizer(
-                batch,
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors="pt",
-            )
-            enc = {k: v.to(self.device) for k, v in enc.items()}
-            token_type_ids = enc.get("token_type_ids")
-
-            self.eval()
-            with torch.no_grad():
-                scores, esci_logits, substitute_logits = self.forward(
-                    enc["input_ids"],
-                    enc["attention_mask"],
-                    token_type_ids,
-                )
-
-            pred_ids = esci_logits.argmax(dim=-1)
-            sub_prob = torch.sigmoid(substitute_logits)
-
-            for j in range(len(batch)):
-                all_scores.append(float(scores[j].cpu()))
-                all_esci.append(ESCI_ID2LABEL[int(pred_ids[j].cpu())])
-                all_sub.append(float(sub_prob[j].cpu()))
+            scores, esci_labels, sub_probs = self._predict_batch(batch)
+            all_scores.extend(scores)
+            all_esci.extend(esci_labels)
+            all_sub.extend(sub_probs)
 
         return all_scores, all_esci, all_sub
+
+    def _predict_batch(
+        self,
+        batch_pairs: List[List[str]],
+    ) -> tuple[List[float], List[str], List[float]]:
+        """
+        Predict scores, ESCI classes, and substitute probabilities for a batch.
+        """
+        enc = self.tokenizer(
+            batch_pairs,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        token_type_ids = enc.get("token_type_ids")
+
+        self.eval()
+        with torch.no_grad():
+            scores, esci_logits, substitute_logits = self.forward(
+                enc["input_ids"],
+                enc["attention_mask"],
+                token_type_ids,
+            )
+
+        pred_ids = esci_logits.argmax(dim=-1)
+        sub_prob = torch.sigmoid(substitute_logits)
+
+        score_list = [float(s) for s in scores.detach().cpu()]
+        esci_list = [ESCI_ID2LABEL[int(i)] for i in pred_ids.detach().cpu()]
+        sub_list = [float(p) for p in sub_prob.detach().cpu()]
+        return score_list, esci_list, sub_list
 
     def rerank(
         self,

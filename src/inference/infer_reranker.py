@@ -14,101 +14,110 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-import yaml
-
-from src.constants import REPO_ROOT
-from src.data.load_data import load_esci, prepare_train_test
+from src.constants import INFER_RERANKER_DEFAULTS, REPO_ROOT
+from src.data.load_data import ESCIDataLoader
 from src.models.reranker import load_reranker
+from src.utils import load_config
 
 logger = logging.getLogger(__name__)
 
 
-def _load_test_df(data_dir: Path, small_version: bool) -> pd.DataFrame:
-    """Load ESCI test split, preferring pre-saved parquet if available."""
-    base = data_dir
-    test_path = base / "esci_test.parquet"
-    if test_path.exists():
-        return pd.read_parquet(test_path)
-
-    df = load_esci(data_dir=base, small_version=small_version)
-    _, test_df = prepare_train_test(df=df)
-    return test_df
-
-
-def _select_query(test_df: pd.DataFrame, query_index: int) -> tuple[str, int]:
+class RerankerInference:
     """
-    Select a query and its query_id from the test set by index.
+    Run reranker inference on a single query from the test set.
 
-    query_index is an index over unique query_ids in the test set, sorted
-    by appearance.
+    Configure via constructor; call run() to execute. Returns 0 on success, 1 on error.
     """
-    by_qid = test_df.groupby("query_id").first().reset_index()
-    if len(by_qid) == 0:
-        raise ValueError("No queries found in test set.")
-    if query_index < 0 or query_index >= len(by_qid):
-        raise IndexError(f"query_index {query_index} out of range 0..{len(by_qid) - 1}")
-    row = by_qid.iloc[query_index]
-    return str(row["query"]), int(row["query_id"])
 
+    def __init__(self, configs: dict) -> None:
+        self.model_path = configs["model_path"]
+        self.data_dir = Path(configs["data_dir"])
+        self.product_col = configs.get("product_col", "product_text")
+        self.query_override = configs.get("query")
+        self.small_version = bool(configs.get("small_version", False))
+        self.batch_size = int(configs.get("batch_size", 16))
+        self.top_k = int(configs.get("top_k", 5))
+        self.query_index = int(configs.get("query_index", 0))
 
-def run_inference(configs: dict) -> int:
-    """Run inference using a config dict from YAML."""
-    # Core knobs (YAML is the single source of truth).
-    model_path = configs["model_path"]
-    data_dir = Path(configs["data_dir"])
-    product_col = configs.get("product_col", "product_text")
-    query_override = configs.get("query")
-    small_version = bool(configs.get("small_version", False))
-    batch_size = int(configs.get("batch_size", 16))
-    top_k = int(configs.get("top_k", 5))
-    query_index = int(configs.get("query_index", 0))
+    def run(self) -> int:
+        """Run inference; return 0 on success, 1 on error."""
+        test_df = self._load_test_df()
+        if test_df.empty:
+            logger.error("No test data found.")
+            return 1
 
-    # Load test data
-    test_df = _load_test_df(data_dir, small_version)
-    if test_df.empty:
-        logger.error("No test data found.")
-        return 1
+        query, qid = self._select_query(test_df)
+        if self.query_override is not None:
+            query = str(self.query_override)
+        logger.info("Using query_index=%d (query_id=%s)", self.query_index, qid)
+        logger.info("Query: %s", query)
 
-    # Select query
-    query, qid = _select_query(test_df, query_index)
-    if query_override:
-        query = str(query_override)
-    logger.info("Using query_index=%d (query_id=%s)", query_index, qid)
-    logger.info("Query: %s", query)
+        rows = test_df[test_df["query_id"] == qid]
+        if len(rows) == 0:
+            logger.error("No products found for query_id %s", qid)
+            return 1
 
-    rows = test_df[test_df["query_id"] == qid]
-    if len(rows) == 0:
-        logger.error("No products found for query_id %s", qid)
-        return 1
+        candidates = self._prepare_candidates(rows)
+        if not candidates:
+            return 1
 
-    if product_col not in rows.columns:
-        logger.error(
-            "Column '%s' not in test data; available: %s",
-            product_col,
-            list(rows.columns),
-        )
-        return 1
+        reranker = load_reranker(model_path=self.model_path)
+        ranked = reranker.rerank(query, candidates, batch_size=self.batch_size)
+        self._log_ranked_results(ranked, candidates, rows, qid)
+        return 0
 
-    candidates = [
-        (str(r["product_id"]), str(r[product_col])) for _, r in rows.iterrows()
-    ]
+    def _load_test_df(self) -> pd.DataFrame:
+        """Load ESCI test split, preferring pre-saved parquet if available."""
+        test_path = self.data_dir / "esci_test.parquet"
+        if test_path.exists():
+            return pd.read_parquet(test_path)
+        loader = ESCIDataLoader(data_dir=self.data_dir, small_version=self.small_version)
+        _, test_df = loader.prepare_train_test()
+        return test_df
 
-    # Load reranker and score candidates
-    reranker = load_reranker(model_path=model_path)
-    ranked = reranker.rerank(query, candidates, batch_size=batch_size)
+    def _select_query(self, test_df: pd.DataFrame) -> tuple[str, int]:
+        """Select query and query_id from test set by index."""
+        by_qid = test_df.groupby("query_id").first().reset_index()
+        if len(by_qid) == 0:
+            raise ValueError("No queries found in test set.")
+        if self.query_index < 0 or self.query_index >= len(by_qid):
+            raise IndexError(
+                f"query_index {self.query_index} out of range 0..{len(by_qid) - 1}"
+            )
+        row = by_qid.iloc[self.query_index]
+        return str(row["query"]), int(row["query_id"])
 
-    # Map product_id -> ESCI label if available
-    labels = rows.get("esci_label", ["?"] * len(rows))
-    pid_to_label = dict(zip(rows["product_id"].astype(str), labels))
+    def _prepare_candidates(self, rows: pd.DataFrame) -> list[tuple[str, str]]:
+        """Build candidate (product_id, product_text) tuples; validate column."""
+        if self.product_col not in rows.columns:
+            logger.error(
+                "Column '%s' not in test data; available: %s",
+                self.product_col,
+                list(rows.columns),
+            )
+            return []
+        return [
+            (str(r["product_id"]), str(r[self.product_col]))
+            for _, r in rows.iterrows()
+        ]
 
-    logger.info("Top %d products for query (query_id=%s):", top_k, qid)
-    for rank, (pid, score) in enumerate(ranked[:top_k], start=1):
-        label = pid_to_label.get(pid, "?")
-        text = next(t for p, t in candidates if p == pid)
-        logger.info("%d. [label=%s] product_id=%s score=%.4f", rank, label, pid, score)
-        logger.info("    %s...", text[:200])
+    def _log_ranked_results(
+        self,
+        ranked: list[tuple[str, float]],
+        candidates: list[tuple[str, str]],
+        rows: pd.DataFrame,
+        qid: int,
+    ) -> None:
+        """Log top-k ranked products with labels and truncated text."""
+        labels = rows.get("esci_label", ["?"] * len(rows))
+        pid_to_label = dict(zip(rows["product_id"].astype(str), labels))
 
-    return 0
+        logger.info("Top %d products for query (query_id=%s):", self.top_k, qid)
+        for rank, (pid, score) in enumerate(ranked[: self.top_k], start=1):
+            label = pid_to_label.get(pid, "?")
+            text = next(t for p, t in candidates if p == pid)
+            logger.info("%d. [label=%s] product_id=%s score=%.4f", rank, label, pid, score)
+            logger.info("    %s...", text[:200])
 
 
 def main() -> int:
@@ -141,13 +150,9 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    cfg: dict = {}
     config_path = REPO_ROOT / args.config
-    if config_path.exists():
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f) or {}
+    cfg = load_config(config_path, INFER_RERANKER_DEFAULTS)
 
-    # CLI overrides config values when provided
     if args.query_index is not None:
         cfg = cfg or {}
         cfg["query_index"] = args.query_index
@@ -158,7 +163,7 @@ def main() -> int:
         cfg = cfg or {}
         cfg["query"] = args.query
 
-    return run_inference(cfg or {})
+    return RerankerInference(cfg or {}).run()
 
 
 if __name__ == "__main__":

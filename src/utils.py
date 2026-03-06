@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import gc
 import logging
+from pathlib import Path
+from typing import Any, Mapping
 
 import torch
+import yaml
 
 
 def clear_torch_cache() -> None:
@@ -26,6 +29,34 @@ def resolve_device(device: torch.device | str | None) -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def load_config(config_path: Path, defaults: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """
+    Load a YAML config file and merge it with defaults.
+
+    Parameters
+    ----------
+    config_path : Path
+        Path to the YAML config file.
+    defaults : Mapping[str, Any] | None
+        Default values; keys here are used when not present in the YAML.
+
+    Returns
+    -------
+    dict[str, Any]
+        Merged configuration dictionary.
+    """
+    cfg: dict[str, Any] = {}
+    if config_path.exists():
+        with config_path.open() as f:
+            loaded = yaml.safe_load(f) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError(f"Config at {config_path} must be a mapping, got {type(loaded)!r}")
+            cfg = loaded
+
+    base: dict[str, Any] = dict(defaults) if defaults is not None else {}
+    return base | cfg
 
 
 _GRAY = "\033[90m"

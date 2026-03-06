@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-import yaml
 
 from src.constants import (
     DATA_DIR,
@@ -27,8 +26,8 @@ from src.constants import (
     REPO_ROOT,
     DEFAULT_RERANKER_MODEL,
 )
-from src.utils import resolve_device
-from src.data.load_data import load_esci, prepare_train_val_test
+from src.utils import resolve_device, load_config
+from src.data.load_data import ESCIDataLoader
 from src.eval.evaluator import ESCIMetricsEvaluator
 from sentence_transformers.cross_encoder import CrossEncoder
 from sentence_transformers.evaluation import SequentialEvaluator
@@ -45,29 +44,13 @@ DEFAULTS = {
     "save_path": "checkpoints/reranker",
     "epochs": 1,
     "batch_size": 16,
+    "max_length": 512,
     "lr": 7e-6,
     "warmup_steps": 5000,
     "evaluation_steps": 15000,
     "early_stopping_patience": 0,
     "val_frac": 0.1,
 }
-
-
-def load_data(
-    base: Path, *, small_version: bool, val_frac: float = 0.1
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Load train, validation, and test DataFrames via load_esci +
-    prepare_train_val_test. Val is a held-out subset of train (by query_id)
-    for mid-training eval; test is completely held out until final eval.
-
-    Returns
-    -------
-    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        Train, validation, and test DataFrames.
-    """
-    df = load_esci(data_dir=base, small_version=small_version)
-    return prepare_train_val_test(df=df, small_version=small_version, val_frac=val_frac)
 
 
 def build_dataloader(
@@ -127,153 +110,192 @@ def create_model(
     )
 
 
-def run_training(
-    data_dir: Path | str | None = None,
-    *,
-    model_name: str = DEFAULT_RERANKER_MODEL,
-    product_col: str = "product_text",
-    save_path: str | Path | None = "checkpoints/reranker",
-    epochs: int = 1,
-    batch_size: int = 32,
-    lr: float = 7e-6,
-    warmup_steps: int = 5000,
-    max_length: int = 512,
-    evaluation_steps: int = 5000,
-    eval_max_queries: int | None = None,
-    small_version: bool = False,
-    device: str | None = None,
-    early_stopping_patience: int = 0,
-    val_frac: float = 0.1,
-):
-    """
-    Train cross-encoder reranker on ESCI (ESCI baseline approach).
+class RerankerTrainer:
+    """Orchestrates data loading, training, and evaluation for the reranker."""
 
-    Parameters
-    ----------
-    data_dir : Path | str | None
-        Directory with ESCI parquets or raw data.
-    model_name : str
-        Pretrained cross-encoder (e.g. ms-marco-MiniLM-L-12-v2).
-    product_col : str
-        Column for product text: "product_text" (full) or "product_title"
-        (ESCI exact).
-    save_path : str | Path | None
-        Where to save the trained model.
-    epochs : int
-        Number of epochs.
-    batch_size : int
-        Training batch size.
-    lr : float
-        Learning rate.
-    warmup_steps : int
-        Warmup steps.
-    max_length : int
-        Max sequence length for [query, product].
-    evaluation_steps : int
-        Evaluate every N steps (0 = no mid-training eval).
-    eval_max_queries : int | None
-        Subsample eval to this many queries (default: all).
-    small_version : bool
-        Use query-product ranking (Task 1) reduced set (~48k queries) if
-        loading from raw.
-    """
-    # Check if sentence-transformers is installed
-    if CrossEncoder is None or InputExample is None:
-        raise ImportError("sentence-transformers is required for train_reranker")
-    base = Path(data_dir or DATA_DIR)
+    def __init__(
+        self,
+        *,
+        data_dir: Path | str | None,
+        model_name: str,
+        product_col: str,
+        save_path: str | Path | None,
+        epochs: int,
+        batch_size: int,
+        lr: float,
+        warmup_steps: int,
+        max_length: int,
+        evaluation_steps: int,
+        eval_max_queries: int | None,
+        small_version: bool,
+        device: str | None,
+        early_stopping_patience: int,
+        val_frac: float,
+    ) -> None:
+        self.data_dir = data_dir
+        self.model_name = model_name
+        self.product_col = product_col
+        self.save_path = save_path
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.lr = lr
+        self.warmup_steps = warmup_steps
+        self.max_length = max_length
+        self.evaluation_steps = evaluation_steps
+        self.eval_max_queries = eval_max_queries
+        self.small_version = small_version
+        self.device = device
+        self.early_stopping_patience = early_stopping_patience
+        self.val_frac = val_frac
 
-    # Load train, validation, and test data (val for mid-training eval; test held out)
-    train_df, val_df, test_df = load_data(
-        base, small_version=small_version, val_frac=val_frac
-    )
+        self.base = Path(self.data_dir or DATA_DIR)
+        self.train_df: pd.DataFrame | None = None
+        self.val_df: pd.DataFrame | None = None
+        self.test_df: pd.DataFrame | None = None
+        self.model: CrossEncoder | None = None
+        self.output_path = str(self.save_path) if self.save_path else None
 
-    logger.info("Data:")
-    logger.info("------")
-    logger.info("data_dir=%s", base)
-    logger.info("small_version=%s", small_version)
-    logger.info("product_col=%s", product_col)
-    logger.info(
-        "train_rows=%d val_rows=%d test_rows=%d",
-        len(train_df),
-        len(val_df),
-        len(test_df),
-    )
-    # Prefer MPS on Apple Silicon when device not set (faster than CPU)
-    if device is None and torch.backends.mps.is_available():
-        device = "mps"
-        logger.info("Using MPS (Apple Silicon GPU) for training.")
-    logger.info("Training:")
-    logger.info("------")
-    logger.info("model=%s device=%s", model_name, device or "auto")
-    logger.info("epochs=%d batch_size=%d lr=%g", epochs, batch_size, lr)
-    logger.info("warmup_steps=%d max_length=%d", warmup_steps, max_length)
-    logger.info("eval_steps=%d eval_max_queries=%s", evaluation_steps, eval_max_queries)
-    logger.info("save_path=%s", save_path)
+    def run(self) -> CrossEncoder:
+        self._load_splits()
+        self._maybe_select_device()
+        self._log_data_config()
+        self._validate_train_columns()
+        self._setup_model()
+        train_dataloader = self._build_train_dataloader()
+        evaluator = self._build_val_evaluator()
+        self._fit_model(train_dataloader, evaluator)
+        self._save_model()
+        self._run_final_eval()
+        return self.model  # type: ignore[return-value]
 
-    if early_stopping_patience > 0:
-        logger.info("early_stopping_patience=%d", early_stopping_patience)
-    logger.info(
-        "val_frac=%g (val used for mid-training eval; test held out until end)",
-        val_frac,
-    )
+    def _load_splits(self) -> None:
+        loader = ESCIDataLoader(data_dir=self.base, small_version=self.small_version)
+        train_df, val_df, test_df = loader.prepare_train_val_test(val_frac=self.val_frac)
+        self.train_df = train_df
+        self.val_df = val_df
+        self.test_df = test_df
 
-    # Check if train_df has the required columns
-    if "esci_label" not in train_df.columns:
-        raise ValueError("train_df must have 'esci_label' (from load_esci)")
-    if product_col not in train_df.columns:
-        raise ValueError(f"train_df must have '{product_col}'")
+    def _maybe_select_device(self) -> None:
+        if self.device is None and torch.backends.mps.is_available():
+            self.device = "mps"
+            logger.info("Using MPS (Apple Silicon GPU) for training.")
 
-    model = create_model(model_name, max_length=max_length, device=device)
-    train_dataloader = build_dataloader(
-        train_df, product_col=product_col, batch_size=batch_size
-    )
-    output_path = str(save_path) if save_path else None
-
-    if output_path:
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
-    evaluator = None
-    if len(val_df) > 0 and evaluation_steps > 0:
-        evaluator = SequentialEvaluator(
-            [
-                ESCIMetricsEvaluator(
-                    val_df,
-                    product_col=product_col,
-                    max_queries=eval_max_queries,
-                    batch_size=batch_size,
-                )
-            ]
+    def _log_data_config(self) -> None:
+        assert self.train_df is not None and self.val_df is not None and self.test_df is not None
+        logger.info("Data:")
+        logger.info("------")
+        logger.info("data_dir=%s", self.base)
+        logger.info("small_version=%s", self.small_version)
+        logger.info("product_col=%s", self.product_col)
+        logger.info(
+            "train_rows=%d val_rows=%d test_rows=%d",
+            len(self.train_df),
+            len(self.val_df),
+            len(self.test_df),
+        )
+        logger.info("Training:")
+        logger.info("------")
+        logger.info("model=%s device=%s", self.model_name, self.device or "auto")
+        logger.info(
+            "epochs=%d batch_size=%d lr=%g",
+            self.epochs,
+            self.batch_size,
+            self.lr,
+        )
+        logger.info(
+            "warmup_steps=%d max_length=%d",
+            self.warmup_steps,
+            self.max_length,
+        )
+        logger.info(
+            "eval_steps=%d eval_max_queries=%s",
+            self.evaluation_steps,
+            self.eval_max_queries,
+        )
+        logger.info("save_path=%s", self.save_path)
+        if self.early_stopping_patience > 0:
+            logger.info(
+                "early_stopping_patience=%d", self.early_stopping_patience
+            )
+        logger.info(
+            "val_frac=%g (val used for mid-training eval; test held out until end)",
+            self.val_frac,
         )
 
-    # MSE loss for ESCI gain regression; Identity activation (logits = scores)
-    model.fit(
-        train_dataloader,
-        evaluator=evaluator,
-        epochs=epochs,
-        loss_fct=torch.nn.MSELoss(),
-        activation_fct=torch.nn.Identity(),
-        warmup_steps=warmup_steps,
-        optimizer_params={"lr": lr},
-        evaluation_steps=evaluation_steps,
-        output_path=output_path,
-        save_best_model=True,
-    )
+    def _validate_train_columns(self) -> None:
+        assert self.train_df is not None
+        if "esci_label" not in self.train_df.columns:
+            raise ValueError("train_df must have 'esci_label' (from ESCIDataLoader.load_esci)")
+        if self.product_col not in self.train_df.columns:
+            raise ValueError(f"train_df must have '{self.product_col}'")
 
-    if output_path:
-        model.save(output_path)
-        logger.info("Reranker saved to %s", output_path)
+    def _setup_model(self) -> None:
+        self.model = create_model(
+            self.model_name,
+            max_length=self.max_length,
+            device=self.device,
+        )
 
-    # Final eval on held-out test set (only now, after training is complete)
-    if len(test_df) > 0:
+    def _build_train_dataloader(self) -> DataLoader:
+        assert self.train_df is not None
+        return build_dataloader(
+            self.train_df,
+            product_col=self.product_col,
+            batch_size=self.batch_size,
+        )
+
+    def _build_val_evaluator(self) -> SequentialEvaluator | None:
+        assert self.val_df is not None
+        if len(self.val_df) == 0 or self.evaluation_steps <= 0:
+            return None
+        esc_eval = ESCIMetricsEvaluator(
+            self.val_df,
+            product_col=self.product_col,
+            max_queries=self.eval_max_queries,
+            batch_size=self.batch_size,
+        )
+        return SequentialEvaluator([esc_eval])
+
+    def _fit_model(
+        self,
+        train_dataloader: DataLoader,
+        evaluator: SequentialEvaluator | None,
+    ) -> None:
+        assert self.model is not None
+        self.model.fit(
+            train_dataloader,
+            evaluator=evaluator,
+            epochs=self.epochs,
+            loss_fct=torch.nn.MSELoss(),
+            activation_fct=torch.nn.Identity(),
+            warmup_steps=self.warmup_steps,
+            optimizer_params={"lr": self.lr},
+            evaluation_steps=self.evaluation_steps,
+            output_path=self.output_path,
+            save_best_model=True,
+        )
+
+    def _save_model(self) -> None:
+        if not self.output_path:
+            return
+        Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
+        assert self.model is not None
+        self.model.save(self.output_path)
+        logger.info("Reranker saved to %s", self.output_path)
+
+    def _run_final_eval(self) -> None:
+        assert self.test_df is not None and self.model is not None
+        if len(self.test_df) == 0:
+            return
         logger.info("------")
         logger.info("Final eval on held-out test set:")
         test_evaluator = ESCIMetricsEvaluator(
-            test_df,
-            product_col=product_col,
-            max_queries=eval_max_queries,
-            batch_size=batch_size,
+            self.test_df,
+            product_col=self.product_col,
+            max_queries=self.eval_max_queries,
+            batch_size=self.batch_size,
         )
-        test_evaluator(model, output_path=None, epoch=-1, steps=-1)
+        test_evaluator(self.model, output_path=None, epoch=-1, steps=-1)
         m = test_evaluator.last_metrics
         logger.info(
             "  nDCG=%.4f MRR=%.4f MAP=%.4f Recall@10=%.4f",
@@ -282,8 +304,6 @@ def run_training(
             m["map"],
             m["recall"],
         )
-
-    return model
 
 
 def main() -> int:
@@ -298,14 +318,13 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    cfg: dict = {}
     config_path = REPO_ROOT / args.config
-    if config_path.exists():
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f) or {}
-    configs = DEFAULTS | (cfg or {})
+    configs = load_config(config_path, DEFAULTS)
 
-    run_training(
+    if CrossEncoder is None or InputExample is None:
+        raise ImportError("sentence-transformers is required for train_reranker")
+
+    trainer = RerankerTrainer(
         data_dir=configs.get("data_dir"),
         model_name=configs.get("model_name"),
         product_col=configs.get("product_col"),
@@ -314,6 +333,7 @@ def main() -> int:
         batch_size=configs.get("batch_size"),
         lr=configs.get("lr"),
         warmup_steps=configs.get("warmup_steps"),
+        max_length=configs.get("max_length"),
         evaluation_steps=configs.get("evaluation_steps"),
         eval_max_queries=configs.get("eval_max_queries"),
         small_version=configs.get("small_version", False),
@@ -321,6 +341,7 @@ def main() -> int:
         early_stopping_patience=configs.get("early_stopping_patience"),
         val_frac=configs.get("val_frac"),
     )
+    trainer.run()
     return 0
 
 

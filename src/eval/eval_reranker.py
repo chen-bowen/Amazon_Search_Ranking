@@ -12,12 +12,11 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-import yaml
-
 from src.constants import DATA_DIR, REPO_ROOT
-from src.data.load_data import load_esci, prepare_train_test
+from src.data.load_data import ESCIDataLoader
 from src.eval.evaluator import ESCIMetricsEvaluator
 from src.models.reranker import load_reranker
+from src.utils import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -43,30 +42,39 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    # Load config from YAML; config overrides DEFAULTS
-    cfg: dict = {}
     config_path = REPO_ROOT / args.config
-    if config_path.exists():
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f) or {}
-    configs = DEFAULTS | (cfg or {})
+    configs = load_config(config_path, DEFAULTS)
 
-    # Load test data: prefer pre-saved parquet, else load from raw and split
-    base = Path(configs["data_dir"])
-    test_path = base / "esci_test.parquet"
-    if test_path.exists():
-        test_df = pd.read_parquet(test_path)
-    else:
-        df = load_esci(
-            data_dir=base, small_version=configs.get("small_version", False)
-        )
-        _, test_df = prepare_train_test(df=df)
-
+    test_df = _load_test_data(configs)
     if len(test_df) == 0:
         logger.error("No test data found.")
         return 1
 
-    # Load model and run evaluation
+    metrics = _run_evaluation(configs, test_df)
+    recall_at = configs["recall_at"]
+    logger.info("nDCG = %.4f", metrics["ndcg"])
+    logger.info("MRR  = %.4f", metrics["mrr"])
+    logger.info("MAP  = %.4f", metrics["map"])
+    logger.info("Recall@%d = %.4f", recall_at, metrics["recall"])
+    return 0
+
+
+def _load_test_data(configs: dict) -> pd.DataFrame:
+    """Load test data: prefer pre-saved parquet, else load from raw and split."""
+    base = Path(configs["data_dir"])
+    test_path = base / "esci_test.parquet"
+    if test_path.exists():
+        return pd.read_parquet(test_path)
+    loader = ESCIDataLoader(
+        data_dir=base,
+        small_version=configs.get("small_version", False),
+    )
+    _, test_df = loader.prepare_train_test()
+    return test_df
+
+
+def _run_evaluation(configs: dict, test_df: pd.DataFrame) -> dict[str, float]:
+    """Run reranker evaluation and return metrics."""
     reranker = load_reranker(model_path=configs["model_path"])
     evaluator = ESCIMetricsEvaluator(
         test_df,
@@ -76,15 +84,7 @@ def main() -> int:
         recall_at_k=configs["recall_at"],
     )
     evaluator(reranker, output_path=None, epoch=-1, steps=-1)
-    metrics = evaluator.last_metrics
-
-    # Log metrics
-    recall_at = configs["recall_at"]
-    logger.info("nDCG = %.4f", metrics["ndcg"])
-    logger.info("MRR  = %.4f", metrics["mrr"])
-    logger.info("MAP  = %.4f", metrics["map"])
-    logger.info("Recall@%d = %.4f", recall_at, metrics["recall"])
-    return 0
+    return evaluator.last_metrics
 
 
 if __name__ == "__main__":

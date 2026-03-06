@@ -22,216 +22,145 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
-# -----------------------------------------------------------------------------
-# Loading: read parquets, merge
-# -----------------------------------------------------------------------------
-
-
-def _load_and_merge_parquets(data_dir: Path) -> pd.DataFrame:
+class ESCIDataLoader:
     """
-    Load examples and products parquets and merge on (product_id,
-    product_locale).
+    ESCI data loader: load parquets, merge, filter, enrich, and prepare splits.
 
-    Parameters
-    ----------
-    data_dir : Path
-        Path to the directory containing the ESCI parquet files.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with the merged examples and products.
+    Implements all data loading logic. Configure via constructor; call load_esci(),
+    prepare_train_test(), or prepare_train_val_test().
     """
-    examples_path = data_dir / EXAMPLES_FILENAME
-    products_path = data_dir / PRODUCTS_FILENAME
-    df_examples = pd.read_parquet(examples_path)
-    df_products = pd.read_parquet(products_path)
-    # Left join: keep every example row, add product metadata
-    return pd.merge(
-        df_examples, df_products, on=["product_id", "product_locale"], how="left"
-    )
 
+    def __init__(
+        self,
+        data_dir: Path | str | None = None,
+        *,
+        small_version: bool = False,
+        locale: str = "us",
+        relevance_map: dict[str, int] | None = None,
+    ) -> None:
+        self.data_dir = data_dir
+        self.small_version = small_version
+        self.locale = locale
+        self.relevance_map = relevance_map
 
-# -----------------------------------------------------------------------------
-# Filtering and relevance
-# -----------------------------------------------------------------------------
+    def load_esci(
+        self,
+        *,
+        save_splits_dir: Path | str | None = None,
+    ) -> pd.DataFrame:
+        """
+        Load, merge, filter, and enrich ESCI data according to this loader's configuration.
+        """
+        data_dir_path = self._resolve_data_dir()
+        self._validate_data_paths(data_dir_path)
 
+        df = self._load_and_merge_parquets(data_dir_path)
+        df = self._apply_filters(df)
+        df = self._add_relevance_column(df)
+        df = self._add_product_text_column(df)
 
-def _apply_filters(
-    df: pd.DataFrame, *, small_version: bool, locale: str = "us"
-) -> pd.DataFrame:
-    """
-    Restrict to small_version (query-product ranking / Task 1 subset) and
-    a single locale.
+        if save_splits_dir is not None:
+            self._save_train_test_splits(df, Path(save_splits_dir))
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with the merged examples and products.
-    small_version : bool
-        If True, restrict to query-product ranking (Task 1) reduced set only.
-    locale : str
-        Product locale to keep (e.g. 'us').
+        return df
 
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with the filtered examples and products.
-    """
-    # Filter to small_version (query-product ranking Task 1 subset)
-    if small_version:
-        df = df[df["small_version"] == 1]
+    def prepare_train_test(
+        self,
+        df: pd.DataFrame | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Return (train_df, test_df) by splitting on the "split" column.
+        If df is None, load via load_esci() first.
+        """
+        if df is None:
+            df = self.load_esci()
+        if "split" not in df.columns:
+            raise ValueError('DataFrame has no "split" column; cannot split train/test.')
+        train = df[df["split"] == "train"].copy()
+        test = df[df["split"] == "test"].copy()
+        return train, test
 
-    # Filter to a single locale (US)
-    df = df[df["product_locale"] == locale]
-    return df
+    def prepare_train_val_test(
+        self,
+        df: pd.DataFrame | None = None,
+        *,
+        val_frac: float = 0.1,
+        random_state: int = 42,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        Return (train_df, val_df, test_df). Train/test from "split" column;
+        val is a held-out subset of train by query_id.
+        """
+        train, test = self.prepare_train_test(df=df)
+        if val_frac <= 0 or val_frac >= 1 or "query_id" not in train.columns:
+            return train, pd.DataFrame(), test
 
+        query_ids = train["query_id"].unique()
+        _, val_qids = train_test_split(query_ids, test_size=val_frac, random_state=random_state)
+        val_ids = set(val_qids)
+        val = train[train["query_id"].isin(val_ids)].copy()
+        train = train[~train["query_id"].isin(val_ids)].copy()
+        return train, val, test
 
-def _add_relevance_column(
-    df: pd.DataFrame, relevance_map: dict[str, int]
-) -> pd.DataFrame:
-    """Map esci_label to numeric relevance; drop rows that don't map."""
-    # Add a new column 'relevance' with the numeric relevance score
-    df["relevance"] = df["esci_label"].map(relevance_map).astype("int32")
+    def _resolve_data_dir(self) -> Path:
+        """Resolve the base data directory."""
+        return Path(self.data_dir or ESCI_SUBDIR)
 
-    # Drop rows that don't map to a relevance score
-    return df.dropna(subset=["relevance"])
-
-
-def _add_product_text_column(df: pd.DataFrame) -> pd.DataFrame:
-    """Add column 'product_text' with expanded product string per row."""
-    df["product_text"] = df.apply(get_product_expanded_text, axis=1)
-    return df
-
-
-# -----------------------------------------------------------------------------
-# Public API
-# -----------------------------------------------------------------------------
-
-
-def load_esci(
-    data_dir: Path | str | None = None,
-    *,
-    small_version: bool = False,
-    locale: str = "us",
-    relevance_map: dict[str, int] | None = None,
-    save_splits_dir: Path | str | None = None,
-) -> pd.DataFrame:
-    """
-    Load ESCI examples + products, merge, filter, and add graded relevance
-    (1-4) and product_text. Optionally write train/test parquets to
-    save_splits_dir (esci_train.parquet, esci_test.parquet).
-
-    Parameters
-    ----------
-    data_dir : Path | str | None
-        Directory containing the ESCI parquet files.
-    small_version : bool
-        If True, use query-product ranking (Task 1) reduced set only; if
-        False (default), use full ESCI set.
-    locale : str
-        Locale, e.g. 'us'.
-    relevance_map : dict[str, int] | None
-        ESCI label -> relevance score (default: E=4, S=2, C=3, I=1).
-    save_splits_dir : Path | str | None
-        If set, write train/test splits here as esci_train.parquet and
-        esci_test.parquet.
-
-    Returns
-    -------
-    pd.DataFrame
-        Loaded and processed ESCI DataFrame.
-    """
-    # Resolve the data directory path
-    data_dir_path = Path(data_dir or ESCI_SUBDIR)
-    examples_path = data_dir_path / EXAMPLES_FILENAME
-    products_path = data_dir_path / PRODUCTS_FILENAME
-
-    if not examples_path.exists():
-        raise FileNotFoundError(
-            f"Examples not found: {examples_path}. "
-            "Place ESCI parquet files in data/ (see README)."
+    def _load_and_merge_parquets(self, data_dir: Path) -> pd.DataFrame:
+        """Load examples and products parquets and merge on id + locale."""
+        examples_path = data_dir / EXAMPLES_FILENAME
+        products_path = data_dir / PRODUCTS_FILENAME
+        df_examples = pd.read_parquet(examples_path)
+        df_products = pd.read_parquet(products_path)
+        return pd.merge(
+            df_examples,
+            df_products,
+            on=["product_id", "product_locale"],
+            how="left",
         )
-    if not products_path.exists():
-        raise FileNotFoundError(f"Products not found: {products_path}.")
 
-    # Load and merge the examples and products parquets
-    df = _load_and_merge_parquets(data_dir_path)
+    def _apply_filters(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply small_version and locale filters."""
+        if self.small_version:
+            df = df[df["small_version"] == 1]
+        df = df[df["product_locale"] == self.locale]
+        return df
 
-    # apply preprocessing steps
-    df = _apply_filters(df, small_version=small_version, locale=locale)
-    mapping = relevance_map or esci_label2relevance_pos
-    df = _add_relevance_column(df, mapping)
-    df = _add_product_text_column(df)
+    def _add_relevance_column(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Attach numeric relevance column from esci_label."""
+        mapping = self.relevance_map or esci_label2relevance_pos
+        df["relevance"] = df["esci_label"].map(mapping).astype("int32")
+        return df.dropna(subset=["relevance"])
 
-    # If save_splits_dir is set, write the train and test parquets
-    if save_splits_dir is not None:
-        out_dir = Path(save_splits_dir)
-        # Split the data into train and test
+    def _add_product_text_column(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Attach expanded product_text column."""
+        df["product_text"] = df.apply(get_product_expanded_text, axis=1)
+        return df
+
+    def _validate_data_paths(self, data_dir: Path) -> None:
+        """Ensure ESCI parquet files exist in the given directory."""
+        examples_path = data_dir / EXAMPLES_FILENAME
+        products_path = data_dir / PRODUCTS_FILENAME
+
+        if not examples_path.exists():
+            raise FileNotFoundError(f"Examples not found: {examples_path}. " "Place ESCI parquet files in data/ (see README).")
+        if not products_path.exists():
+            raise FileNotFoundError(f"Products not found: {products_path}.")
+
+    def _save_train_test_splits(self, df: pd.DataFrame, out_dir: Path) -> None:
+        """Persist train and test splits to parquet files in out_dir."""
         train = df[df["split"] == "train"]
         test = df[df["split"] == "test"]
 
-        # Create the output directory if it doesn't exist, save the train and test parquets
         out_dir.mkdir(parents=True, exist_ok=True)
-        train.to_parquet(out_dir / "esci_train.parquet", index=False)
-        test.to_parquet(out_dir / "esci_test.parquet", index=False)
-        logger.info("Train: %s rows -> %s", len(train), out_dir / "esci_train.parquet")
-        logger.info("Test: %s rows -> %s", len(test), out_dir / "esci_test.parquet")
+        train_path = out_dir / "esci_train.parquet"
+        test_path = out_dir / "esci_test.parquet"
 
-    return df
+        train.to_parquet(train_path, index=False)
+        test.to_parquet(test_path, index=False)
 
-
-def prepare_train_test(
-    df: pd.DataFrame | None = None,
-    data_dir: Path | str | None = None,
-    *,
-    small_version: bool = False,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Return (train_df, test_df) by splitting on the "split" column.
-    Provide either a preloaded dataframe or a data_dir to load via load_esci.
-    small_version: if True, use query-product ranking (Task 1) reduced set
-    (~48k queries, easier retrieval).
-    """
-    if df is None:
-        if data_dir is None:
-            data_dir = ESCI_SUBDIR
-        df = load_esci(data_dir=data_dir, small_version=small_version)
-    if "split" not in df.columns:
-        raise ValueError('DataFrame has no "split" column; cannot split train/test.')
-    train = df[df["split"] == "train"].copy()
-    test = df[df["split"] == "test"].copy()
-    return train, test
-
-
-def prepare_train_val_test(
-    df: pd.DataFrame | None = None,
-    data_dir: Path | str | None = None,
-    *,
-    small_version: bool = False,
-    val_frac: float = 0.1,
-    random_state: int = 42,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Return (train_df, val_df, test_df). Train and test from "split" column;
-    val is a held-out subset of train by query_id (for mid-training eval
-    without touching test). val_frac: fraction of train queries for
-    validation (default 0.1).
-    """
-    train, test = prepare_train_test(
-        df=df, data_dir=data_dir, small_version=small_version
-    )
-    if val_frac <= 0 or val_frac >= 1 or "query_id" not in train.columns:
-        return train, pd.DataFrame(), test
-
-    query_ids = train["query_id"].unique()
-    train_qids, val_qids = train_test_split(
-        query_ids, test_size=val_frac, random_state=random_state
-    )
-    val_ids = set(val_qids)
-    val = train[train["query_id"].isin(val_ids)].copy()
-    train = train[~train["query_id"].isin(val_ids)].copy()
-    return train, val, test
+        logger.info("Train: %s rows -> %s", len(train), train_path)
+        logger.info("Test: %s rows -> %s", len(test), test_path)
 
 
 if __name__ == "__main__":
@@ -243,9 +172,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     # Parse command-line arguments
-    p = argparse.ArgumentParser(
-        description="Load ESCI data; optionally save train/test parquets"
-    )
+    p = argparse.ArgumentParser(description="Load ESCI data; optionally save train/test parquets")
     p.add_argument("--data-dir", type=str, default=None)
     p.add_argument(
         "--save-splits",
@@ -260,5 +187,6 @@ if __name__ == "__main__":
         data_dir = DATA_DIR
 
     # Load the ESCI data
-    load_esci(data_dir=data_dir, save_splits_dir=DATA_DIR if args.save_splits else None)
+    loader = ESCIDataLoader(data_dir=data_dir)
+    loader.load_esci(save_splits_dir=DATA_DIR if args.save_splits else None)
     sys.exit(0)
