@@ -21,14 +21,12 @@ Trained on the [Shopping Queries Dataset](https://arxiv.org/abs/2206.06588) with
 
 ### ESCI labels and gains
 
-
 | Label | Meaning     | Gain (nDCG) |
 | ----- | ----------- | ----------- |
 | E     | Exact match | 1.0         |
 | S     | Substitute  | 0.1         |
 | C     | Complement  | 0.01        |
 | I     | Irrelevant  | 0.0         |
-
 
 Training uses MSE loss: the model predicts a scalar and is trained to match these gain values.
 
@@ -84,36 +82,38 @@ The original single-task `CrossEncoderReranker` (Task 1 only) is still available
 
 1. **Clone or open the repo** and enter the project root.
 2. **Install dependencies** (prefer `uv` for a locked environment):
-  ```bash
-   uv sync
-  ```
-   Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies).
-3. **Download the Amazon ESCI parquets** into `data/`:
-  - `shopping_queries_dataset_products.parquet`
-  - `shopping_queries_dataset_examples.parquet`
+
+```bash
+ uv sync
+```
+
+Or with pip: `pip install -e .` (see `pyproject.toml` for dependencies). 3. **Download the Amazon ESCI parquets** into `data/`:
+
+- `shopping_queries_dataset_products.parquet`
+- `shopping_queries_dataset_examples.parquet`
+
 4. **Materialize train/test splits:**
-  ```bash
-   uv run python -m src.data.load_data --save-splits
-  ```
-   Writes `data/esci_train.parquet` and `data/esci_test.parquet`.
-5. **Verify:** Run training (see [Pipeline](#pipeline)); it will fail with a clear error if any file is missing.
+
+```bash
+ uv run python -m src.data.load_data --save-splits
+```
+
+Writes `data/esci_train.parquet` and `data/esci_test.parquet`. 5. **Verify:** Run training (see [Pipeline](#pipeline)); it will fail with a clear error if any file is missing.
 
 ---
 
 ## How to use each component
 
-
-| Component                     | Command / Usage                                                                                     | When to use                                              |
-| ----------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| **Data prep**                 | `uv run python -m src.data.load_data --save-splits`                                                 | First step: write train/test parquets from raw.          |
-| **Train (multi)**             | `uv run python -m src.training.train_multi_task_reranker --config configs/multi_task_reranker.yaml` | Train the multi-task learning reranker (recommended).    |
-| **Train (single)**            | `uv run python -m src.training.train_reranker --config configs/reranker.yaml`                       | Train single-task cross-encoder (Task 1 baseline).       |
-| **Eval (single)**             | `uv run python -m src.eval.eval_reranker --config configs/reranker.yaml`                            | Standalone eval on test set for the single-task model.   |
-| **Inference (multi, Python)** | `from src.models.multi_task_reranker import load_multi_task_reranker` → `predict()` / `rerank()`    | Score/rerank with multi-task outputs inside Python.      |
+| Component                     | Command / Usage                                                                                      | When to use                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Data prep**                 | `uv run python -m src.data.load_data --save-splits`                                                  | First step: write train/test parquets from raw.            |
+| **Train (multi)**             | `uv run python -m src.training.train_multi_task_reranker --config configs/multi_task_reranker.yaml`  | Train the multi-task learning reranker (recommended).      |
+| **Train (single)**            | `uv run python -m src.training.train_reranker --config configs/reranker.yaml`                        | Train single-task cross-encoder (Task 1 baseline).         |
+| **Eval (single)**             | `uv run python -m src.eval.eval_reranker --config configs/reranker.yaml`                             | Standalone eval on test set for the single-task model.     |
+| **Inference (multi, Python)** | `from src.models.multi_task_reranker import load_multi_task_reranker` → `predict()` / `rerank()`     | Score/rerank with multi-task outputs inside Python.        |
 | **Inference (multi, CLI)**    | `uv run python -m src.inference.infer_multi_task_reranker --config configs/multi_task_reranker.yaml` | Sample test query with score, ESCI class, substitute prob. |
-| **Inference (HTTP)**          | Run FastAPI (see API section) and call `POST /rerank`                                               | Production-style integration using the multi-task model. |
-| **Tests**                     | `uv run pytest tests/ -v`                                                                           | Run unit tests.                                          |
-
+| **Inference (HTTP)**          | Run FastAPI (see API section) and call `POST /rerank`                                                | Production-style integration using the multi-task model.   |
+| **Tests**                     | `uv run pytest tests/ -v`                                                                            | Run unit tests.                                            |
 
 **Typical workflow (multi-task, default):** 1) Data prep → 2) Train multi-task → 3) (Optional) Train/eval single-task baseline → 4) Use `load_multi_task_reranker` in Python or the FastAPI `/rerank` endpoint.
 
@@ -123,21 +123,17 @@ The original single-task `CrossEncoderReranker` (Task 1 only) is still available
 
 ### Input files (under `data/`)
 
-
 | File                                          | Key columns                                                    | Role                                                     |
 | --------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------- |
 | **shopping_queries_dataset_examples.parquet** | query_id, query, product_id, esci_label, split                 | Query–product pairs and ESCI labels; split = train/test. |
 | **shopping_queries_dataset_products.parquet** | product_id, product_locale, product_title, product_description | Product metadata; merged with examples for full text.    |
 
-
 ### Data prep output
-
 
 | Output                 | Description                        |
 | ---------------------- | ---------------------------------- |
 | **esci_train.parquet** | Training split (split == "train"). |
 | **esci_test.parquet**  | Test split (split == "test").      |
-
 
 `load_esci` adds `product_text` (title + description) for richer input. Use `product_title` for shorter, ESCI-exact style. **Task 1 (small_version):** Reduced set (~48k queries) for faster experiments.
 
@@ -213,27 +209,26 @@ uv run python -m src.training.train_reranker --config configs/reranker_fast.yaml
 
 Official baselines from [amazon-science/esci-data](https://github.com/amazon-science/esci-data) (BERT-based models, fine-tuned per locale for Task 1; MLP classifier for Tasks 2/3):
 
-| Task | Metrics | Baseline |
-| ---- | ------- | -------- |
-| 1 | nDCG | 0.83 |
-| 2 | Macro F1, Micro F1 | 0.23, 0.62 |
-| 3 | Macro F1, Micro F1 | 0.44, 0.76 |
+| Task | Metrics            | Baseline   |
+| ---- | ------------------ | ---------- |
+| 1    | nDCG               | 0.83       |
+| 2    | Macro F1, Micro F1 | 0.23, 0.62 |
+| 3    | Macro F1, Micro F1 | 0.44, 0.76 |
 
 ### Multi-task model (test set)
 
 Setup: default config (`configs/multi_task_reranker.yaml`). Test set evaluation on the full ESCI test split. All metrics beat the [official esci-data baselines](https://github.com/amazon-science/esci-data) above.
 
-| Task | Metric | Ours | Baseline |
-| ---- | ------ | ---- | -------- |
-| **Task 1** (ranking) | nDCG | **0.9443** | 0.83 |
-| | MRR | 0.9840 | — |
-| | MAP | 0.9620 | — |
-| | Recall@10 | 0.6133 | — |
-| **Task 2** (4-class ESCI) | Accuracy | 0.7332 | — |
-| | Macro F1 | **0.5366** | 0.23 |
-| **Task 3** (substitute) | Accuracy | 0.8115 | — |
-| | F1 | **0.5085** | 0.44 (macro) |
-
+| Task                      | Metric    | Ours       | Baseline     |
+| ------------------------- | --------- | ---------- | ------------ |
+| **Task 1** (ranking)      | nDCG      | **0.9443** | 0.83         |
+|                           | MRR       | 0.9840     | —            |
+|                           | MAP       | 0.9620     | —            |
+|                           | Recall@10 | 0.6133     | —            |
+| **Task 2** (4-class ESCI) | Accuracy  | 0.7332     | —            |
+|                           | Macro F1  | **0.5366** | 0.23         |
+| **Task 3** (substitute)   | Accuracy  | 0.8115     | —            |
+|                           | F1        | **0.5085** | 0.44 (macro) |
 
 **What the metrics mean:** nDCG = normalized discounted cumulative gain with graded gains (E/S/C/I). MRR = mean reciprocal rank of first relevant item. MAP = mean average precision. Recall@10 = fraction of relevant items in top-10. All computed per query and averaged; higher is better.
 
@@ -405,25 +400,25 @@ uv run uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
 
 **Environment variables:**
 
-| Variable | Description |
-|----------|--------------|
-| `MODEL_PATH` | Local path or HF repo ID for the reranker (default: `checkpoints/multi_task_reranker`). |
-| `HF_MODEL_REPO_ID` | Hugging Face repo for fallback download. |
+| Variable           | Description                                                                                        |
+| ------------------ | -------------------------------------------------------------------------------------------------- |
+| `MODEL_PATH`       | Local path or HF repo ID for the reranker (default: `checkpoints/multi_task_reranker`).            |
+| `HF_MODEL_REPO_ID` | Hugging Face repo for fallback download.                                                           |
 | `INFERENCE_DEVICE` | Inference device override: `cuda`, `mps`, or `cpu` (default: auto-resolve `cuda` > `mps` > `cpu`). |
-| `RATE_LIMIT` | Per-IP rate limit (default: `100/minute`). |
-| `API_KEY` | When set, require this key on POST endpoints (`X-API-Key` or `Authorization: Bearer`). |
+| `RATE_LIMIT`       | Per-IP rate limit (default: `100/minute`).                                                         |
+| `API_KEY`          | When set, require this key on POST endpoints (`X-API-Key` or `Authorization: Bearer`).             |
 
 ### Endpoints
 
-| Method | Path | Description |
-|--------|------|--------------|
-| GET | `/health` | Liveness; returns `status` and `model_loaded` (rate-limit exempt). |
-| GET | `/ready` | Readiness for k8s; `ready` or `not_ready` (rate-limit exempt). |
-| GET | `/metrics` | Prometheus metrics (rate-limit exempt). |
-| POST | `/rerank` | Task 1: rank candidates by relevance score only. |
-| POST | `/classify` | Task 2: ESCI class (E/S/C/I) per candidate. |
-| POST | `/substitute` | Task 3: substitute label (true/false) per candidate. |
-| POST | `/predict` | All tasks: score + ESCI + substitute, sorted by score. |
+| Method | Path          | Description                                                        |
+| ------ | ------------- | ------------------------------------------------------------------ |
+| GET    | `/health`     | Liveness; returns `status` and `model_loaded` (rate-limit exempt). |
+| GET    | `/ready`      | Readiness for k8s; `ready` or `not_ready` (rate-limit exempt).     |
+| GET    | `/metrics`    | Prometheus metrics (rate-limit exempt).                            |
+| POST   | `/rerank`     | Task 1: rank candidates by relevance score only.                   |
+| POST   | `/classify`   | Task 2: ESCI class (E/S/C/I) per candidate.                        |
+| POST   | `/substitute` | Task 3: substitute label (true/false) per candidate.               |
+| POST   | `/predict`    | All tasks: score + ESCI + substitute, sorted by score.             |
 
 ### Monitoring and environment
 
@@ -439,7 +434,10 @@ uv run uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
 {
   "query": "wireless headphones",
   "candidates": [
-    { "product_id": "p1", "text": "Sony WH-1000XM4 Wireless Noise Cancelling Headphones" },
+    {
+      "product_id": "p1",
+      "text": "Sony WH-1000XM4 Wireless Noise Cancelling Headphones"
+    },
     { "product_id": "p2", "text": "Bose QuietComfort 45 Bluetooth Headphones" }
   ]
 }
@@ -451,25 +449,29 @@ uv run uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
 ### Response examples
 
 **GET /health**
+
 ```json
-{"status": "ok", "model_loaded": true}
+{ "status": "ok", "model_loaded": true }
 ```
 
 **GET /ready**
+
 ```json
-{"status": "ready"}
+{ "status": "ready" }
 ```
+
 Or `{"status": "not_ready"}` when the model is not loaded.
 
 All POST responses include `request_id` (same as `X-Request-ID` header) and `stats` for tracing and debugging. Stats: `total_latency_ms`, `model_forward_time_ms`, `num_candidates`, `num_recommendations`, `device`, `top_score` / `avg_score` (rerank and predict only), `timestamp`.
 
 **POST /rerank** – sorted by score descending
+
 ```json
 {
   "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "ranked": [
-    {"product_id": "p1", "score": 0.92},
-    {"product_id": "p2", "score": 0.78}
+    { "product_id": "p1", "score": 0.92 },
+    { "product_id": "p2", "score": 0.78 }
   ],
   "stats": {
     "total_latency_ms": 45.2,
@@ -485,12 +487,13 @@ All POST responses include `request_id` (same as `X-Request-ID` header) and `sta
 ```
 
 **POST /classify** – same order as request
+
 ```json
 {
   "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "results": [
-    {"product_id": "p1", "esci_class": "E"},
-    {"product_id": "p2", "esci_class": "S"}
+    { "product_id": "p1", "esci_class": "E" },
+    { "product_id": "p2", "esci_class": "S" }
   ],
   "stats": {
     "total_latency_ms": 38.1,
@@ -504,15 +507,17 @@ All POST responses include `request_id` (same as `X-Request-ID` header) and `sta
   }
 }
 ```
+
 ESCI: E=Exact, S=Substitute, C=Complement, I=Irrelevant.
 
 **POST /substitute** – same order as request
+
 ```json
 {
   "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "results": [
-    {"product_id": "p1", "is_substitute": false},
-    {"product_id": "p2", "is_substitute": true}
+    { "product_id": "p1", "is_substitute": false },
+    { "product_id": "p2", "is_substitute": true }
   ],
   "stats": {
     "total_latency_ms": 42.0,
@@ -526,15 +531,27 @@ ESCI: E=Exact, S=Substitute, C=Complement, I=Irrelevant.
   }
 }
 ```
+
 `is_substitute: true` when the product is a functional substitute (ESCI=S).
 
 **POST /predict** – all outputs, sorted by score descending
+
 ```json
 {
   "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "ranked": [
-    {"product_id": "p1", "score": 0.92, "esci_class": "E", "is_substitute": false},
-    {"product_id": "p2", "score": 0.78, "esci_class": "S", "is_substitute": true}
+    {
+      "product_id": "p1",
+      "score": 0.92,
+      "esci_class": "E",
+      "is_substitute": false
+    },
+    {
+      "product_id": "p2",
+      "score": 0.78,
+      "esci_class": "S",
+      "is_substitute": true
+    }
   ],
   "stats": {
     "total_latency_ms": 52.3,
@@ -555,22 +572,25 @@ ESCI: E=Exact, S=Substitute, C=Complement, I=Irrelevant.
 # Health check
 curl http://localhost:8000/health
 ```
+
 ```json
-{"status":"ok","model_loaded":true}
+{ "status": "ok", "model_loaded": true }
 ```
 
 ```bash
 # Readiness (k8s)
 curl http://localhost:8000/ready
 ```
+
 ```json
-{"status":"ready"}
+{ "status": "ready" }
 ```
 
 ```bash
 # Prometheus metrics
 curl http://localhost:8000/metrics
 ```
+
 Example output (excerpt): `# HELP rerank_requests_total Total number of /rerank requests` and histogram/counter lines.
 
 ```bash
@@ -579,8 +599,25 @@ curl -X POST http://localhost:8000/rerank \
   -H "Content-Type: application/json" \
   -d '{"query": "wireless headphones", "candidates": [{"product_id": "p1", "text": "Sony WH-1000XM4 Wireless Noise Cancelling Headphones"}, {"product_id": "p2", "text": "Bose QuietComfort 45 Bluetooth Headphones"}, {"product_id": "p3", "text": "USB-C Charging Cable 6ft"}]}'
 ```
+
 ```json
-{"request_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","ranked":[{"product_id":"p1","score":0.92},{"product_id":"p2","score":0.85},{"product_id":"p3","score":0.12}],"stats":{"total_latency_ms":48.5,"model_forward_time_ms":42.0,"num_candidates":3,"num_recommendations":3,"top_score":0.92,"avg_score":0.63,"timestamp":1772490882.9}}
+{
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "ranked": [
+    { "product_id": "p1", "score": 0.92 },
+    { "product_id": "p2", "score": 0.85 },
+    { "product_id": "p3", "score": 0.12 }
+  ],
+  "stats": {
+    "total_latency_ms": 48.5,
+    "model_forward_time_ms": 42.0,
+    "num_candidates": 3,
+    "num_recommendations": 3,
+    "top_score": 0.92,
+    "avg_score": 0.63,
+    "timestamp": 1772490882.9
+  }
+}
 ```
 
 ```bash
@@ -589,8 +626,21 @@ curl -X POST http://localhost:8000/classify \
   -H "Content-Type: application/json" \
   -d '{"query": "wireless headphones", "candidates": [{"product_id": "p1", "text": "Sony WH-1000XM4"}]}'
 ```
+
 ```json
-{"request_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","results":[{"product_id":"p1","esci_class":"E"}],"stats":{"total_latency_ms":35.2,"model_forward_time_ms":28.0,"num_candidates":1,"num_recommendations":1,"top_score":null,"avg_score":null,"timestamp":1772490882.9}}
+{
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "results": [{ "product_id": "p1", "esci_class": "E" }],
+  "stats": {
+    "total_latency_ms": 35.2,
+    "model_forward_time_ms": 28.0,
+    "num_candidates": 1,
+    "num_recommendations": 1,
+    "top_score": null,
+    "avg_score": null,
+    "timestamp": 1772490882.9
+  }
+}
 ```
 
 ```bash
@@ -599,8 +649,21 @@ curl -X POST http://localhost:8000/substitute \
   -H "Content-Type: application/json" \
   -d '{"query": "wireless headphones", "candidates": [{"product_id": "p1", "text": "Sony WH-1000XM4"}]}'
 ```
+
 ```json
-{"request_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","results":[{"product_id":"p1","is_substitute":false}],"stats":{"total_latency_ms":33.1,"model_forward_time_ms":26.5,"num_candidates":1,"num_recommendations":1,"top_score":null,"avg_score":null,"timestamp":1772490882.9}}
+{
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "results": [{ "product_id": "p1", "is_substitute": false }],
+  "stats": {
+    "total_latency_ms": 33.1,
+    "model_forward_time_ms": 26.5,
+    "num_candidates": 1,
+    "num_recommendations": 1,
+    "top_score": null,
+    "avg_score": null,
+    "timestamp": 1772490882.9
+  }
+}
 ```
 
 ```bash
@@ -609,8 +672,40 @@ curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
   -d '{"query": "wireless headphones", "candidates": [{"product_id": "p1", "text": "Sony WH-1000XM4 Wireless Noise Cancelling Headphones"}, {"product_id": "p2", "text": "Bose QuietComfort 45 Bluetooth Headphones"}, {"product_id": "p3", "text": "USB-C Charging Cable 6ft"}]}'
 ```
+
 ```json
-{"request_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","ranked":[{"product_id":"p1","score":0.92,"esci_class":"E","is_substitute":false},{"product_id":"p2","score":0.85,"esci_class":"E","is_substitute":false},{"product_id":"p3","score":0.12,"esci_class":"I","is_substitute":false}],"stats":{"total_latency_ms":55.0,"model_forward_time_ms":48.0,"num_candidates":3,"num_recommendations":3,"top_score":0.92,"avg_score":0.63,"timestamp":1772490882.9}}
+{
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "ranked": [
+    {
+      "product_id": "p1",
+      "score": 0.92,
+      "esci_class": "E",
+      "is_substitute": false
+    },
+    {
+      "product_id": "p2",
+      "score": 0.85,
+      "esci_class": "E",
+      "is_substitute": false
+    },
+    {
+      "product_id": "p3",
+      "score": 0.12,
+      "esci_class": "I",
+      "is_substitute": false
+    }
+  ],
+  "stats": {
+    "total_latency_ms": 55.0,
+    "model_forward_time_ms": 48.0,
+    "num_candidates": 3,
+    "num_recommendations": 3,
+    "top_score": 0.92,
+    "avg_score": 0.63,
+    "timestamp": 1772490882.9
+  }
+}
 ```
 
 ---
@@ -642,14 +737,11 @@ The container serves the app on port 8000. Set `MODEL_PATH` (and optionally `HF_
 
 ## Troubleshooting
 
-
-| Issue                    | Fix                                                                    |
-| ------------------------ | ---------------------------------------------------------------------- |
+| Issue                    | Fix                                                                                                                                                                     |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model_loaded: false`    | Train first so `checkpoints/multi_task_reranker` exists, or set `MODEL_PATH=USERNAME/amazon-multitask-reranker` and `hf auth login`. Check server logs for load errors. |
-| MPS OOM on Apple Silicon | Add `device: cpu` to config or reduce `batch_size` to 8.               |
-| Slow eval                | Set `eval_max_queries: 1000` in config or increase `evaluation_steps`. |
-| Out of memory            | Reduce `batch_size`, use `product_title` instead of `product_text`.    |
-
+| MPS OOM on Apple Silicon | Add `device: cpu` to config or reduce `batch_size` to 8.                                                                                                                |
+| Slow eval                | Set `eval_max_queries: 1000` in config or increase `evaluation_steps`.                                                                                                  |
 
 ---
 
@@ -665,36 +757,34 @@ Tests cover constants, ESCI evaluator, data utils, and load_data (ESCIDataLoader
 
 ## Project structure
 
-
-| Path                                          | Description                                                                                              |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **configs/reranker.yaml**                     | Training config: model, batch_size, lr, evaluation_steps, early_stopping, val_frac, save_path.           |
-| **configs/multi_task_reranker.yaml**          | Multi-task learning training: task weights, save_path (checkpoints/multi_task_reranker), lr, batch_size. |
-| **src/api/main.py**                           | FastAPI app; lifespan, middleware (logging), rate limit, GET /ready, GET /metrics.                        |
-| **src/api/routes.py**                         | GET /health, POST /rerank, /classify, /substitute, /predict (metrics + optional API key).               |
-| **src/api/schemas.py**                        | Pydantic request/response models (RerankRequest, RerankResponse, etc.).                                  |
-| **src/api/deps.py**                           | Model instance and path resolution (MODEL_PATH, HF_MODEL_REPO_ID env).                                  |
-| **src/api/metrics.py**                        | Prometheus registry, counters, histograms, model_loaded gauge.                                            |
-| **src/api/auth.py**                           | Optional API key verification (X-API-Key or Authorization: Bearer).                                    |
-| **src/api/limiter.py**                        | Per-IP rate limiter (RATE_LIMIT env).                                                                   |
-| **src/constants.py**                          | ESCI gains, ESCI_LABEL2ID, DATA_DIR, MODEL_CACHE_DIR, DEFAULT_RERANKER_MODEL.                            |
-| **src/data/load_data.py**                     | ESCIDataLoader: load_esci, prepare_train_test, prepare_train_val_test (split by query_id).               |
-| **src/data/utils.py**                         | Product text expansion (get_product_expanded_text).                                                      |
-| **src/eval/evaluator.py**                     | ESCIMetricsEvaluator, compute_query_metrics (nDCG, MRR, MAP, Recall@k).                                  |
-| **src/eval/eval_reranker.py**                 | Standalone eval script: load model, run on test set, print metrics.                                      |
-| **src/models/reranker.py**                    | CrossEncoderReranker, load_reranker, predict(), rerank().                                                |
-| **src/models/multi_task_reranker.py**         | MultiTaskReranker (ranking + 4-class + substitute), load_multi_task_reranker(), save/load.               |
-| **src/training/train_reranker.py**            | Training entrypoint: load data, fit CrossEncoder (Task 1), final test eval.                              |
-| **src/training/train_multi_task_reranker.py** | Multi-task learning training: combined loss, Task 1/2/3, save to checkpoints/multi_task_reranker.        |
-| **src/training/early_stopping.py**            | EarlyStoppingCallback (patience on nDCG).                                                                |
-| **src/inference/infer_reranker.py**           | RerankerInference: CLI for single-task reranker on test set.                                             |
-| **src/inference/infer_multi_task_reranker.py**| MultiTaskRerankerInference: CLI for multi-task reranker (score, ESCI, substitute).                        |
-| **scripts/upload_to_huggingface.py**          | Upload checkpoint to Hugging Face Hub (--repo-id, --private, etc.).                                       |
-| **tests/**                                    | test_constants, test_evaluator, test_data_utils, test_load_data.                                         |
-| **notebooks/**                                | load_data, train_reranker, inference_reranker.                                                           |
-| **Dockerfile**, **docker-compose.yml**        | Container build and run for the API service.                                                             |
-| **pyproject.toml**, **uv.lock**               | Project and dependency lock (uv).                                                                        |
-
+| Path                                           | Description                                                                                              |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **configs/reranker.yaml**                      | Training config: model, batch_size, lr, evaluation_steps, early_stopping, val_frac, save_path.           |
+| **configs/multi_task_reranker.yaml**           | Multi-task learning training: task weights, save_path (checkpoints/multi_task_reranker), lr, batch_size. |
+| **src/api/main.py**                            | FastAPI app; lifespan, middleware (logging), rate limit, GET /ready, GET /metrics.                       |
+| **src/api/routes.py**                          | GET /health, POST /rerank, /classify, /substitute, /predict (metrics + optional API key).                |
+| **src/api/schemas.py**                         | Pydantic request/response models (RerankRequest, RerankResponse, etc.).                                  |
+| **src/api/deps.py**                            | Model instance and path resolution (MODEL_PATH, HF_MODEL_REPO_ID env).                                   |
+| **src/api/metrics.py**                         | Prometheus registry, counters, histograms, model_loaded gauge.                                           |
+| **src/api/auth.py**                            | Optional API key verification (X-API-Key or Authorization: Bearer).                                      |
+| **src/api/limiter.py**                         | Per-IP rate limiter (RATE_LIMIT env).                                                                    |
+| **src/constants.py**                           | ESCI gains, ESCI_LABEL2ID, DATA_DIR, MODEL_CACHE_DIR, DEFAULT_RERANKER_MODEL.                            |
+| **src/data/load_data.py**                      | ESCIDataLoader: load_esci, prepare_train_test, prepare_train_val_test (split by query_id).               |
+| **src/data/utils.py**                          | Product text expansion (get_product_expanded_text).                                                      |
+| **src/eval/evaluator.py**                      | ESCIMetricsEvaluator, compute_query_metrics (nDCG, MRR, MAP, Recall@k).                                  |
+| **src/eval/eval_reranker.py**                  | Standalone eval script: load model, run on test set, print metrics.                                      |
+| **src/models/reranker.py**                     | CrossEncoderReranker, load_reranker, predict(), rerank().                                                |
+| **src/models/multi_task_reranker.py**          | MultiTaskReranker (ranking + 4-class + substitute), load_multi_task_reranker(), save/load.               |
+| **src/training/train_reranker.py**             | Training entrypoint: load data, fit CrossEncoder (Task 1), final test eval.                              |
+| **src/training/train_multi_task_reranker.py**  | Multi-task learning training: combined loss, Task 1/2/3, save to checkpoints/multi_task_reranker.        |
+| **src/training/early_stopping.py**             | EarlyStoppingCallback (patience on nDCG).                                                                |
+| **src/inference/infer_reranker.py**            | RerankerInference: CLI for single-task reranker on test set.                                             |
+| **src/inference/infer_multi_task_reranker.py** | MultiTaskRerankerInference: CLI for multi-task reranker (score, ESCI, substitute).                       |
+| **scripts/upload_to_huggingface.py**           | Upload checkpoint to Hugging Face Hub (--repo-id, --private, etc.).                                      |
+| **tests/**                                     | test_constants, test_evaluator, test_data_utils, test_load_data.                                         |
+| **notebooks/**                                 | load_data, train_reranker, inference_reranker.                                                           |
+| **Dockerfile**, **docker-compose.yml**         | Container build and run for the API service.                                                             |
+| **pyproject.toml**, **uv.lock**                | Project and dependency lock (uv).                                                                        |
 
 ---
 
