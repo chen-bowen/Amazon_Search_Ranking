@@ -34,26 +34,97 @@ Training uses MSE loss: the model predicts a scalar and is trained to match thes
 
 ## Overall Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 1. Data Preparation                                                         │
-│    Raw parquets → ESCIDataLoader.prepare_train_val_test → train/val/test   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 2. Training (multi-task, default)                                          │
-│    Shared encoder + 3 heads (Task 1/2/3)                                   │
-│    Combined loss (MSE + CE + BCE), early stopping on nDCG                  │
-│    Best checkpoint saved to checkpoints/multi_task_reranker                │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 3. Inference / Serving                                                      │
-│    load_multi_task_reranker() or FastAPI /rerank                           │
-│    Returns (score, esci_class, is_substitute) per candidate                │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  %% 1. DATA PREPARATION
+  subgraph Data[1. Data preparation]
+    D1[Raw ESCI parquet files]
+    D2[Read, join, clean ESCI examples and products]
+    D3[Write train, validation, and test splits by query_id]
+    D1 --> D2 --> D3
+  end
+
+  %% 2. TRAINING
+  subgraph Train[2. Training]
+    T1[Multi-task reranker with shared encoder and three heads]
+    T2[Single-task reranker baseline for ranking only]
+    T3[Trained model checkpoints for both variants]
+    D3 --> T1
+    D3 --> T2
+    T1 --> T3
+    T2 --> T3
+  end
+
+  %% 3. OFFLINE EVALUATION
+  subgraph Eval[3. Offline evaluation]
+    E1[Compute ESCI metrics such as nDCG, MRR, MAP, Recall, and F1]
+    D3 --> E1
+    T3 --> E1
+  end
+
+  %% 4. MODEL STORAGE AND REGISTRY
+  subgraph Registry[4. Model storage and registry]
+    R1[Local checkpoint directory for the trained rerankers]
+    R2[Optional Hugging Face Hub repository for sharing the model]
+    T3 --> R1
+    R1 <--> R2
+  end
+
+  %% 5. DOCKER, INFERENCE, AND SERVING
+  subgraph Docker[5. Docker deployment, inference, and serving]
+
+    %% 5a. STARTUP INSIDE THE CONTAINER
+    subgraph Startup[At container startup]
+      S1[Read environment variables such as MODEL_PATH and HF_MODEL_REPO_ID]
+      S2[Load multi-task reranker from local checkpoints or Hugging Face]
+      S3[Choose inference device and set up caches]
+      R1 --> S2
+      R2 --> S2
+      S1 --> S2 --> S3
+    end
+
+    %% 5b. FASTAPI SERVICE INSIDE THE CONTAINER
+    subgraph API[FastAPI layer]
+      A1[Health, readiness, and metrics endpoints]
+      A2[POST /rerank, /classify, /substitute, /predict]
+      A3[API key authentication and per-IP rate limiting]
+      S3 --> A2
+    end
+
+    %% 5c. PER REQUEST FLOW INSIDE THE CONTAINER
+    subgraph Request[Per request processing]
+      Q1[Receive HTTP request with query and candidate products]
+      QC[Check in-process response cache]
+      Q2[Compute scores with multi-task reranker and update cache]
+      Q3[Return JSON with scores, ESCI labels, substitute flags, and stats]
+      A2 --> Q1
+      Q1 --> QC
+      QC -->|cache hit| Q3
+      QC -->|cache miss| Q2
+      Q2 --> Q3
+    end
+
+    %% 5d. MONITORING INSIDE THE CONTAINER
+    subgraph Monitor[Monitoring and observability]
+      M1[Request counters and latency histograms in Prometheus]
+      M2[Serve /metrics for scraping by monitoring stack]
+      M3[Structured logs with request identifiers]
+      Q3 --> M1
+      Q3 --> M3
+      M1 --> M2
+    end
+
+  end
+
+  %% 6. EXTERNAL CLIENTS
+  subgraph Clients[6. External clients]
+    C1[Search and retrieval systems that send candidates]
+    C2[Product surfaces and internal tools consuming reranked results]
+    C3[Monitoring and alerting systems reading Prometheus metrics]
+    C1 --> Q1
+    C2 --> Q1
+    M2 --> C3
+  end
 ```
 
 The original single-task `CrossEncoderReranker` (Task 1 only) is still available and can be trained/evaluated separately.
