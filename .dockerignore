@@ -10,6 +10,7 @@ build/
 .gitignore
 .uv/
 .python-version
+!README.md
 *.md
 *.parquet
 data/
